@@ -1,7 +1,8 @@
 """Token accounting of canonical documents (docs/tokenization.md): characters' grammar categories,
 tokens attributed by them, and a byte-level BPE trained on documents keeping lexemes whole.
 
-``python -m unitracker.optimiser.tokenizer {train CORPUS --vocab N --out DIR, eval DIR CORPUS}``.
+``python -m unitracker.optimiser.tokenizer train CORPUS... --vocab N --out DIR`` and
+``... eval DIR CORPUS...``.
 """
 
 import argparse
@@ -195,9 +196,10 @@ def held_out(path: Path) -> bool:
     return int(hashlib.sha1(path.stem.encode()).hexdigest()[:8], 16) % HELD_OUT == 0
 
 
-def documents(corpus: Path) -> tuple:
-    """``(train, held)``: the corpus's ``.yaml`` documents, sorted, by split."""
-    paths = sorted(corpus.rglob("*.yaml"))
+def documents(*corpus: Path) -> tuple:
+    """``(train, held)``: the ``.yaml`` documents under the ``corpus`` directories, sorted, by
+    split."""
+    paths = sorted(p for c in corpus for p in c.rglob("*.yaml"))
     return [p for p in paths if not held_out(p)], [p for p in paths if held_out(p)]
 
 
@@ -273,15 +275,15 @@ def main(argv=None) -> int:
     )
     sub = ap.add_subparsers(dest="command", required=True)
     p = sub.add_parser("train", help="train a BPE on the corpus's training split")
-    p.add_argument("corpus", type=Path)
+    p.add_argument("corpus", type=Path, nargs="+")
     p.add_argument("--vocab", type=int, required=True)
     p.add_argument("--out", type=Path, required=True)
     p = sub.add_parser("eval", help="tokens per held-out document against the references")
     p.add_argument("tokenizer", type=Path)
-    p.add_argument("corpus", type=Path)
+    p.add_argument("corpus", type=Path, nargs="+")
     p.add_argument("--references", nargs="*", default=list(REFERENCES))
     args = ap.parse_args(argv)
-    train_paths, held = documents(args.corpus)
+    train_paths, held = documents(*args.corpus)
     if args.command == "train":
         train(train_paths, args.vocab, args.out)
         print(f"{args.out / 'tokenizer.json'}: {len(train_paths)} documents, vocab {args.vocab}")
