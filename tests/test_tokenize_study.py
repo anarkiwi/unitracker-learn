@@ -5,7 +5,6 @@ import csv
 import json
 
 import pytest
-from unitracker_grammar.document import read
 
 import corpus
 import optimiser_docs as D
@@ -21,51 +20,20 @@ def _apply(name, text=DOC):
     return tokens.applied(text, tokens.TRANSFORMS[name](text, tree, lexemes))
 
 
-def test_separators_lose_their_spaces_but_not_their_meaning():
-    text = _apply("comma-space")
-    assert "\n    -,A#2,-*3,C4,off," in text and "{title: T,author: Ö}" in text
-    assert "    adc #c\n" in text
-    text = _apply("colon-space")
-    assert "{ad:9, sr:240," in text and "meta:{title:T, author:Ö}" in text
-
-
-def test_a_wrapped_line_is_unwrapped():
-    text = D.HEAD + "voices: 1\nins:\n  i1: {ad: 9, ctrl: [{ctrl: 65}, end]}\nphrase:\n"
-    text += "  p1: [" + ", ".join(["C4.i1"] * 30) + "]\nsong:\n  - play: [p1]\n  - end\n"
-    from unitracker_grammar.document import printed  # pylint: disable=import-outside-toplevel
-
-    text = printed(read(text))
-    assert text.count("\n") > 10
-    assert _apply("no-wrap", text).count("\n") == 10
-
-
-def test_indentation_and_numbers_are_rewritten():
-    assert "\n  lda PL.lo,x\n" in _apply("indent-1")
+def test_numbers_are_written_in_hexadecimal():
     text = _apply("hex")
-    assert "sr: $F0," in text and "!freq:$4D2" in text and "up($12C)" in text
-    assert "[0, $84, 32, $FF]" in text
+    assert "sr:$F0," in text and " freq:$4D2" in text and "up($12C)" in text
+    assert "[0,$84,32,$FF]" in text and "ad:9," in text
 
 
 def test_tables_are_delta_coded():
-    assert "PL: [0, +132, -100, +223]" in _apply("delta-tables")
+    assert "PL:[0,+132,-100,+223]" in _apply("delta-tables")
 
 
 def test_keys_shorten_to_unique_prefixes():
     text = _apply("short-keys")
-    assert "{a: 9, s: 240, c: [{c: 65, n: +0}, {w: 1, n: G#5}" in text
-    assert "\nm: {title: T, author: Ö}\nv: 1\n" in text and "\n  - pl: [p1]\n" in text
-
-
-def test_notes_lose_sharps_and_repeated_octaves():
-    assert "-, a2, -*3, C4, off, c4, D5" in _apply("sharp-lower")
-    assert "-, A#2, -*3, C4, off, C#, D5" in _apply("octave-elide")
-    assert "-, a2, -*3, C4, off, c, D5" in _apply("notes")
-    assert "note: g5}" in _apply("notes")
-
-
-def test_commands_and_code_lines_lose_their_marks():
-    assert "D5 freq:1234]" in _apply("command-space")
-    assert "|\n\tlda PL.lo,x\n\tadc #c\n" in _apply("code-tab")
+    assert "{a:9,sr:240,c:[{c:65,n:+0},{w:1,n:g5}" in text and "D5 f:1234 legato]" in text
+    assert "\nme:{title:T,author:Ö}\nv:1\n" in text and "\n - pl:[p1]\n" in text
 
 
 def test_overlapping_edits_keep_the_first():
@@ -99,15 +67,15 @@ def test_the_study_measures_forms_categories_and_transforms(forms_root, capsys):
     assert one["chars"] == len(DOC) and one["events"] == 8 and sum(one["cat_chars"]) == len(DOC)
     for name in tk.REFERENCES:
         assert sum(one[name]["cats"]) == one[name]["tokens"]
-        assert one[name]["transforms"]["comma-space"] < one[name]["tokens"]
+        assert one[name]["transforms"]["short-keys"] < one[name]["tokens"]
     row = next(l for l in printed.splitlines() if l.startswith("| lifted | cl100k_base |"))
     mean = (
         one["cl100k_base"]["tokens"] + results["b"]["forms"]["lifted"]["cl100k_base"]["tokens"]
     ) / 2
     assert f"| {mean:.0f} |" in row
-    assert "| note |" in printed and "| combined |" in printed
+    assert "| note |" in printed and "| short-keys |" in printed
     top = next(l for l in printed.splitlines() if l.startswith("| note | `"))
-    assert "` -*` " in top and "`#` " in top and "`\\n` " in printed
+    assert "`,-` " in top and "`:g` " in top and "`\\n` " in printed
 
 
 def test_forms_are_the_optimisers_and_lossy_when_it_has_it(monkeypatch):
@@ -174,7 +142,7 @@ def test_a_lossy_form_is_the_lifted_document_optimised_lossily(tmp_path):
     res = corpus.forms_one({"path": "x/t.sid"}, _opts(tmp_path, forms=forms))
     assert res["lossy"] == "ok" and res["lossy-all"] == "ok" and "named" not in res
     lossy = (tmp_path / "lossy" / "t.yaml").read_text()
-    assert ": |\n" in D.EXACT and ": |\n" not in lossy
+    assert ":|\n" in D.EXACT and ":|\n" not in lossy
     inlined = (tmp_path / "lossy-all" / "t.yaml").read_text()
     assert "\nins:" in lossy and "\nins:" not in inlined
 

@@ -47,10 +47,11 @@ LONG = 3
 WHOLE = ("table", "code")
 ARGUED = frozenset(("CALL", "ARGS"))
 _ARG = re.compile(r"(?<=[(,])[+-]?\d+")
-_INDENT = re.compile(r"\n *")
-# lexemes: newline+indentation, note, key or name with ": ", number, punctuation run, spaces
+_INDENT = re.compile(r"\n[ \t]*")
+# lexemes: newline+indentation, note, key or name after its space with its ":", number,
+# punctuation run, spaces
 LEXEME = (
-    r"\n *|[A-G]#?-?\d+\b|!?[A-Za-z_][A-Za-z0-9_]*(?:\.[a-z]+)*:? ?|[+-]?\d+"
+    r"\n[ \t]*|[A-Ga-g]-?\d+\b| ?[A-Za-z_][A-Za-z0-9_]*(?:\.[a-z]+)*:?|[+-]?\d+"
     r"|[^\sA-Za-z0-9]+ ?| +|\S"
 )
 REFERENCES = {"cl100k_base": None, "o200k_base": None, "qwen2.5": "Qwen/Qwen2.5-0.5B"}
@@ -110,7 +111,7 @@ _SPACE = np.array([chr(c) in " \n\t" for c in range(128)])
 def categories(text: str, lexemes: list | None = None) -> np.ndarray:
     """Each character's index into :data:`CATEGORIES` (uint8): its terminal's category (a table
     or code block whole), else key (a letter), punct, space or indent (a newline and the spaces
-    after it) by the character; any non-ASCII character is unicode."""
+    or tab after it) by the character; any non-ASCII character is unicode."""
     if lexemes is None:
         lexemes = lex(text)[1]
     code = np.frombuffer(text.encode("utf-32-le"), np.uint32)
