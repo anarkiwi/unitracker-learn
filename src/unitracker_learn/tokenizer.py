@@ -162,6 +162,21 @@ class Encoder:
             return len(self._tt.encode(text, disallowed_special=()))
         return len(self._hf.encode(text, add_special_tokens=False).ids)
 
+    def encode(self, texts: list) -> list:
+        """Each of ``texts``' token ids (uint32)."""
+        if self._tt is not None:
+            return [np.asarray(self._tt.encode(t, disallowed_special=()), np.uint32) for t in texts]
+        return [
+            np.asarray(e.ids, np.uint32)
+            for e in self._hf.encode_batch(texts, add_special_tokens=False)
+        ]
+
+    def decode(self, ids) -> str:
+        """The text of token ``ids``."""
+        if self._tt is not None:
+            return self._tt.decode([int(i) for i in ids])
+        return self._hf.decode([int(i) for i in ids], skip_special_tokens=False)
+
     def spans(self, text: str) -> tuple:
         """``(starts, ends)``: each token's character span of ``text``."""
         if self._tt is not None:
