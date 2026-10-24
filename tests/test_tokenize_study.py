@@ -13,6 +13,7 @@ import shared
 import tokens
 from test_tokenize import DOC
 from unitracker.optimiser import tokenizer as tk
+from unitracker.optimiser.fit import TOLERANCES
 
 
 def _apply(name, text=DOC):
@@ -103,13 +104,23 @@ def test_the_study_measures_forms_categories_and_transforms(forms_root, capsys):
 
 
 def test_forms_are_the_optimisers_and_lossy_when_it_has_it(monkeypatch):
-    assert list(corpus.forms()) == ["lifted", "named", "single", "all"]
+    table = corpus.forms()
+    assert list(table) == ["lifted", "named", "single", "all", "lossy", "lossy-single", "lossy-all"]
+    assert table["lossy"] == ("lifted", {"lossy": dict(TOLERANCES)})
+    assert table["lossy-all"] == ("lossy", {"inline": "all"})
+    assert corpus.with_bases(["lossy-all", "single"]) == [
+        "lifted",
+        "named",
+        "single",
+        "lossy",
+        "lossy-all",
+    ]
 
-    def lossy(text, ticks=None, *, lossy=False):  # pylint: disable=unused-argument
+    def exact(text, ticks=None, *, inline="named"):  # pylint: disable=unused-argument
         return text
 
-    monkeypatch.setattr(corpus, "optimise", lossy)
-    assert corpus.forms()["lossy"] == {"lossy": True}
+    monkeypatch.setattr(corpus, "optimise", exact)
+    assert list(corpus.forms()) == ["lifted", "named", "single", "all"]
 
 
 def test_a_songs_length_is_its_end_or_its_first_loop():
@@ -149,19 +160,16 @@ def test_a_tunes_forms_are_optimised_from_its_cached_lifted_document(tmp_path):
     assert len(named) < len(D.HOIST) and not list(tmp_path.rglob("*.err"))
 
 
-def test_a_lossy_form_is_the_lifted_document_optimised_lossily(tmp_path, monkeypatch):
+def test_a_lossy_form_is_the_lifted_document_optimised_lossily(tmp_path):
     (tmp_path / "lifted").mkdir()
-    (tmp_path / "lifted" / "t.yaml").write_text(D.HOIST, encoding="utf-8")
-    calls = []
-
-    def lossy(text, ticks=None, *, lossy=False):
-        calls.append((ticks, lossy))
-        return type("Result", (), {"text": text.replace("2048", "2047")})
-
-    monkeypatch.setattr(corpus, "optimise", lossy)
-    res = corpus.forms_one({"path": "x/t.sid"}, _opts(tmp_path, forms=["lifted", "lossy"]))
-    assert res["lossy"] == "ok" and calls == [(200, True)]
-    assert "2047" in (tmp_path / "lossy" / "t.yaml").read_text()
+    (tmp_path / "lifted" / "t.yaml").write_text(D.EXACT, encoding="utf-8")
+    forms = corpus.with_bases(["lossy-all"])
+    res = corpus.forms_one({"path": "x/t.sid"}, _opts(tmp_path, forms=forms))
+    assert res["lossy"] == "ok" and res["lossy-all"] == "ok" and "named" not in res
+    lossy = (tmp_path / "lossy" / "t.yaml").read_text()
+    assert ": |\n" in D.EXACT and ": |\n" not in lossy
+    inlined = (tmp_path / "lossy-all" / "t.yaml").read_text()
+    assert "\nins:" in lossy and "\nins:" not in inlined
 
 
 def test_a_tune_that_does_not_lift_has_no_forms_and_stays_failed(tmp_path):
@@ -169,7 +177,7 @@ def test_a_tune_that_does_not_lift_has_no_forms_and_stays_failed(tmp_path):
     sid.write_bytes(b"not a sid")
     out = tmp_path / "out"
     res = corpus.forms_one({"path": str(sid)}, _opts(out))
-    assert res["lifted"].startswith("FormatError") and res["named"] == "no lifted document"
+    assert res["lifted"].startswith("FormatError") and res["named"] == "no lifted form"
     (out / "lifted" / "junk.err").write_text("Earlier: failure\n")
     assert corpus.forms_one({"path": str(sid)}, _opts(out))["lifted"] == "Earlier: failure"
     assert corpus.forms_one({"path": str(sid)}, _opts(out, retry=True))["lifted"].startswith(
