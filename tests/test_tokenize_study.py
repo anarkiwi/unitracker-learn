@@ -63,6 +63,11 @@ def test_notes_lose_sharps_and_repeated_octaves():
     assert "note: g5}" in _apply("notes")
 
 
+def test_commands_and_code_lines_lose_their_marks():
+    assert "D5 freq:1234]" in _apply("command-space")
+    assert "|\n\tlda PL.lo,x\n\tadc #c\n" in _apply("code-tab")
+
+
 def test_overlapping_edits_keep_the_first():
     assert tokens.applied("abcdef", [(3, 5, "X"), (1, 4, "Y"), (5, 5, "Z")]) == "aYeZf"
 
@@ -101,6 +106,8 @@ def test_the_study_measures_forms_categories_and_transforms(forms_root, capsys):
     ) / 2
     assert f"| {mean:.0f} |" in row
     assert "| note |" in printed and "| combined |" in printed
+    top = next(l for l in printed.splitlines() if l.startswith("| note | `"))
+    assert "` -*` " in top and "`#` " in top and "`\\n` " in printed
 
 
 def test_forms_are_the_optimisers_and_lossy_when_it_has_it(monkeypatch):

@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sys
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -124,6 +125,20 @@ def octave_elide(_text, tree, _lexemes) -> list:
     return out
 
 
+def command_space(_text, _tree, lexemes) -> list:
+    """An event's commands introduced by a space instead of ``!`` (``C4 legato tick.freq:1``)."""
+    return _edits(
+        lexemes,
+        lambda t, c: t.startswith("!") and c != "text",
+        lambda t: " " + t[1:],
+    )
+
+
+def code_tab(_text, _tree, lexemes) -> list:
+    """A code block's lines indented by a tab instead of four spaces."""
+    return _edits(lexemes, lambda t, c: c == "code" and t == "    ", lambda _: "\t")
+
+
 def notes(text, tree, lexemes) -> list:
     """:func:`sharp_lower` and :func:`octave_elide` together."""
     elided = {e[0]: e for e in octave_elide(text, tree, lexemes)}
@@ -146,8 +161,11 @@ TRANSFORMS = {
     "sharp-lower": sharp_lower,
     "octave-elide": octave_elide,
     "notes": notes,
+    "command-space": command_space,
+    "code-tab": code_tab,
 }
-COMBINED = ("comma-space", "colon-space", "no-wrap", "notes")
+TOP = 20
+COMBINED = ("comma-space", "colon-space", "no-wrap", "notes", "command-space", "code-tab")
 
 
 def applied(text: str, edits: list) -> str:
@@ -161,9 +179,17 @@ def applied(text: str, edits: list) -> str:
     return "".join(out) + text[at:]
 
 
+def _top_tokens(text: str, attributed, starts, ends) -> list:
+    top = [Counter() for _ in tk.CATEGORIES]
+    for cat, start, end in zip(attributed, starts, ends):
+        top[cat][text[start:end]] += 1
+    return [dict(c.most_common(TOP)) for c in top]
+
+
 def measure(text: str, encoders: list) -> dict:
     """A document's characters, events and characters per category, and per encoder its
-    tokens, the tokens each category takes and its tokens after each transform."""
+    tokens, the tokens each category takes and its tokens after each transform; for the first
+    encoder, each category's most frequent token strings (:data:`TOP` of them)."""
     tree, lexemes = tk.lex(text)
     cats = tk.categories(text, lexemes)
     edits = {name: fn(text, tree, lexemes) for name, fn in TRANSFORMS.items()}
@@ -180,6 +206,8 @@ def measure(text: str, encoders: list) -> dict:
             "cats": np.bincount(attributed, minlength=len(tk.CATEGORIES)).tolist(),
             "transforms": {k: enc.count(v) for k, v in variants.items()},
         }
+        if name == encoders[0]:
+            res["top"] = _top_tokens(text, attributed, starts, ends)
     return res
 
 
@@ -258,12 +286,25 @@ def _transforms(common: list, forms: list, encoders: list) -> str:
     return "\n".join(lines)
 
 
+def _top(common: list, form: str, encoder: str) -> str:
+    lines = [f"| category | {Path(encoder).name} tokens (share of the category's) |", "|---|---|"]
+    for i, cat in enumerate(tk.CATEGORIES):
+        top = sum((Counter(r["forms"][form]["top"][i]) for r in common), Counter())
+        total = sum(r["forms"][form][encoder]["cats"][i] for r in common)
+        cells = ", ".join(
+            f"`{json.dumps(k)[1:-1]}` {_pct(v, total)}" for k, v in top.most_common(8)
+        )
+        lines.append(f"| {cat} | {cells.replace('|', chr(92) + '|')} |")
+    return "\n".join(lines)
+
+
 def summary(results: list, meta: dict, forms: list, encoders: list) -> dict:
     """The study's markdown tables over the tunes every form has: tokens by form and encoder,
-    each form's categories, and each transform's saving."""
+    each form's categories, the first form's top tokens, and each transform's saving."""
     common = [r for r in results if all(f in r["forms"] for f in forms)]
     tables = {"study": _study(common, meta, forms, encoders)}
     tables |= {f"categories {f}": _categories(common, f, encoders) for f in forms}
+    tables[f"top tokens {forms[0]}"] = _top(common, forms[0], encoders[0])
     tables["transforms"] = _transforms(common, forms, encoders)
     tables["docs"] = f"{len(common)} tunes with every form of {', '.join(forms)}"
     return tables
