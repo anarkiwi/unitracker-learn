@@ -11,7 +11,7 @@ import optimiser_docs as D
 from unitracker.optimiser import tokenizer as tk
 
 DOC = (
-    "unitracker:2.2\n"
+    "unitracker:2.3\n"
     "meta:{title:T,author:Ö}\n"
     "voices:1\n"
     "tables:\n"
