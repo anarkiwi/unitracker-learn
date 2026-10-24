@@ -22,26 +22,24 @@ def _apply(name, text=DOC):
 
 def test_separators_lose_their_spaces_but_not_their_meaning():
     text = _apply("comma-space")
-    assert "[C4.i1,-,A#2,-*3," in text and "{title: T,author: A}" in text
+    assert "\n    -,A#2,-*3,C4,off," in text and "{title: T,author: Ö}" in text
     assert "    adc #c\n" in text
     text = _apply("colon-space")
-    assert "{ad:9, sr:240," in text and "meta:{title:T, author:A}" in text
+    assert "{ad:9, sr:240," in text and "meta:{title:T, author:Ö}" in text
 
 
 def test_a_wrapped_line_is_unwrapped():
-    long = "  - def:\n      phrase:\n        p1: [" + ", ".join(["C4.i1"] * 30) + "]\n"
-    text = D.HEAD + "voices: 1\nins:\n  i1: {ad: 9, ctrl: [{ctrl: 65}, end]}\nsong:\n"
-    text += long + "    play: [p1]\n  - end\n"
+    text = D.HEAD + "voices: 1\nins:\n  i1: {ad: 9, ctrl: [{ctrl: 65}, end]}\nphrase:\n"
+    text += "  p1: [" + ", ".join(["C4.i1"] * 30) + "]\nsong:\n  - play: [p1]\n  - end\n"
     from unitracker_grammar.document import printed  # pylint: disable=import-outside-toplevel
 
     text = printed(read(text))
-    assert text.count("\n") > 11
-    assert _apply("no-wrap", text).count("\n") == 11
+    assert text.count("\n") > 10
+    assert _apply("no-wrap", text).count("\n") == 10
 
 
-def test_indentation_phi_and_numbers_are_rewritten():
+def test_indentation_and_numbers_are_rewritten():
     assert "\n  lda PL.lo,x\n" in _apply("indent-1")
-    assert "d*(phi % 4)" in _apply("ascii-phi")
     text = _apply("hex")
     assert "sr: $F0," in text and "!freq:$4D2" in text and "up($12C)" in text
     assert "[0, $84, 32, $FF]" in text
@@ -54,14 +52,13 @@ def test_tables_are_delta_coded():
 def test_keys_shorten_to_unique_prefixes():
     text = _apply("short-keys")
     assert "{a: 9, s: 240, c: [{c: 65, n: +0}, {w: 1, n: G#5}" in text
-    assert "\n  - d:\n      ph: \n" not in text and "      p" in text
+    assert "\nm: {title: T, author: Ö}\nv: 1\n" in text and "\n  - pl: [p1]\n" in text
 
 
 def test_notes_lose_sharps_and_repeated_octaves():
-    assert "[C4.i1, -, a2, -*3, C4, off, c#4" not in _apply("sharp-lower")
-    assert "p1: [C4.i1, -, a2, -*3, C4, off, c4, D5" in _apply("sharp-lower")
-    assert "p1: [C4.i1, -, A#2, -*3, C4, off, C#, D5" in _apply("octave-elide")
-    assert "p1: [C4.i1, -, a2, -*3, C4, off, c, D5" in _apply("notes")
+    assert "-, a2, -*3, C4, off, c4, D5" in _apply("sharp-lower")
+    assert "-, A#2, -*3, C4, off, C#, D5" in _apply("octave-elide")
+    assert "-, a2, -*3, C4, off, c, D5" in _apply("notes")
     assert "note: g5}" in _apply("notes")
 
 
@@ -106,7 +103,7 @@ def test_the_study_measures_forms_categories_and_transforms(forms_root, capsys):
 
 
 def test_forms_are_the_optimisers_and_lossy_when_it_has_it(monkeypatch):
-    assert list(corpus.forms()) == ["lifted", "named", "single"]
+    assert list(corpus.forms()) == ["lifted", "named", "single", "all"]
 
     def lossy(text, ticks=None, *, lossy=False):  # pylint: disable=unused-argument
         return text

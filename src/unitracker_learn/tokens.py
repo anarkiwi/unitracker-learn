@@ -14,6 +14,7 @@ import numpy as np
 from pysidtracker.jobs import imap
 from tqdm import tqdm
 
+import corpus as lift
 from unitracker.optimiser import tokenizer as tk
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,23 +56,18 @@ def indent_one(text, _tree, _lexemes) -> list:
     return [(m.start(), m.end(), " " * (len(m.group()) // 2)) for m in _INDENT.finditer(text)]
 
 
-def ascii_phi(text, _tree, _lexemes) -> list:
-    """``φ`` written ``phi``, the name code gives it."""
-    return [(m.start(), m.end(), "phi") for m in re.finditer("φ", text)]
-
-
 def hexadecimal(_text, _tree, lexemes) -> list:
     """Integers of three or more decimal digits, a call's arguments too, written ``$`` and
     hexadecimal."""
 
     def repl(t):
-        pattern = _LONG_ARG if t.type == "CALL" else _LONG
+        pattern = _LONG_ARG if t.type in tk.ARGUED else _LONG
         return pattern.sub(lambda m: f"${int(m.group()):X}", t)
 
     return _edits(
         lexemes,
         lambda t, _: (t.type in tk.NUMBERS and _LONG.search(t))
-        or (t.type == "CALL" and _LONG_ARG.search(t)),
+        or (t.type in tk.ARGUED and _LONG_ARG.search(t)),
         repl,
     )
 
@@ -144,7 +140,6 @@ TRANSFORMS = {
     "colon-space": colon_space,
     "no-wrap": no_wrap,
     "indent-1": indent_one,
-    "ascii-phi": ascii_phi,
     "hex": hexadecimal,
     "delta-tables": delta_tables,
     "short-keys": short_keys,
@@ -152,7 +147,7 @@ TRANSFORMS = {
     "octave-elide": octave_elide,
     "notes": notes,
 }
-COMBINED = ("comma-space", "colon-space", "ascii-phi", "no-wrap")
+COMBINED = ("comma-space", "colon-space", "no-wrap", "notes")
 
 
 def applied(text: str, edits: list) -> str:
@@ -279,7 +274,7 @@ def main(argv=None) -> int:
     os.environ.setdefault("HF_HOME", str(ROOT / ".cache" / "hf"))
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("root", type=Path, nargs="?", default=Path("out/tokenize"))
-    ap.add_argument("--forms", nargs="*", default=["lifted", "named", "single"])
+    ap.add_argument("--forms", nargs="*", default=list(lift.forms()))
     ap.add_argument("--encoders", nargs="*", default=list(tk.REFERENCES))
     ap.add_argument("--jobs", type=int, default=max(1, len(os.sched_getaffinity(0)) - 2))
     args = ap.parse_args(argv)

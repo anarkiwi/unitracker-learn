@@ -35,7 +35,8 @@ CATEGORIES = (
 CAT = {c: i for i, c in enumerate(CATEGORIES)}
 NAMES = frozenset(
     "INS CTRL PW FILTER RESTART PHRASE XTABLE SIGNATURE PROGRAM_SIG CALL PARAM REL_PARAM "
-    "TABLE_BYTE NAME STATE_NAME".split()
+    "TABLE_BYTE NAME STATE_NAME DEF_INS DEF_RESTART DEF_CTRL DEF_PW DEF_FILTER DEF_PHRASE DEF_SIG "
+    "ARGS".split()
 )
 NUMBERS = frozenset("INT SIGNED OFFSET CTRLMASK STATE_SIZE".split())
 NOTES = frozenset(("NOTE", "NOTE_ATOM"))
@@ -43,6 +44,7 @@ TEXTS = frozenset(("TEXT", "SQUOTED", "DQUOTED"))
 CONTEXTS = {"intlist": "table", "code": "code", "asm": "code", "expr": "expr", "text": "text"}
 LONG = 3
 WHOLE = ("table", "code")
+ARGUED = frozenset(("CALL", "ARGS"))
 _ARG = re.compile(r"(?<=[(,])[+-]?\d+")
 _INDENT = re.compile(r"\n *")
 # lexemes: newline+indentation, note, key or name with ": ", number, punctuation run, spaces
@@ -127,7 +129,7 @@ def categories(text: str, lexemes: list | None = None) -> np.ndarray:
             continue
         keep = ~word[span] if cat == CAT["name"] else space[span]
         cats[span] = np.where(keep, cats[span], cat)
-        if token.type == "CALL":
+        if token.type in ARGUED:
             for m in _ARG.finditer(token):
                 n = sum(c.isdigit() for c in m.group())
                 cats[token.start_pos + m.start() : token.start_pos + m.end()] = CAT[

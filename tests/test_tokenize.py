@@ -11,26 +11,24 @@ import optimiser_docs as D
 from unitracker.optimiser import tokenizer as tk
 
 DOC = (
-    "unitracker: 2.0\n"
-    "meta: {title: T, author: A}\n"
+    "unitracker: 2.1\n"
+    "meta: {title: T, author: Ö}\n"
     "voices: 1\n"
     "tables:\n"
     "  PL: [0, 132, 32, 255]\n"
     "mod:\n"
-    "  vib(d): v + d*(φ % 4)\n"
+    "  vib(d): v + d*(phi % 4)\n"
     "  up(c): |\n"
     "    lda PL.lo,x\n"
     "    adc #c\n"
     "    sta v+1\n"
     "    rts\n"
-    "ins:\n"
-    "  i1: {ad: 9, sr: 240, ctrl: [{ctrl: 65, note: +0}, {wait: 1, note: G#5}, end],"
-    " pw: up(300), freq: vib(2)}\n"
+    "phrase:\n"
+    "  p1: [C4.i1={ad: 9, sr: 240, ctrl: [{ctrl: 65, note: +0}, {wait: 1, note: G#5}, end],"
+    " pw: up(300), freq: vib(2)},\n"
+    "    -, A#2, -*3, C4, off, C#4, D5!freq:1234]\n"
     "song:\n"
-    "  - def:\n"
-    "      phrase:\n"
-    "        p1: [C4.i1, -, A#2, -*3, C4, off, C#4, D5!freq:1234]\n"
-    "    play: [p1]\n"
+    "  - play: [p1]\n"
     "  - end\n"
 )
 
@@ -46,7 +44,7 @@ def test_lexemes_cover_the_text_in_order_with_their_contexts():
     assert tk.events(tree) == 8
     ctx = {t.start_pos: c for t, c in lexemes}
     assert ctx[DOC.index("lda")] == "code" and ctx[DOC.index("132")] == "table"
-    assert ctx[DOC.index("φ")] == "expr" and ctx[DOC.index("T,")] == "text"
+    assert ctx[DOC.index("phi")] == "expr" and ctx[DOC.index("T,")] == "text"
     assert ctx[DOC.index("C4.i1")] == ""
 
 
@@ -59,7 +57,7 @@ def test_lexemes_cover_the_text_in_order_with_their_contexts():
         ("off", 0, "note"),
         ("sr", 0, "key"),
         ("wait", 0, "key"),
-        ("i1", 1, "name"),
+        ("i1", 0, "name"),
         ("p1", 1, "name"),
         ("9", 0, "number"),
         ("240", 0, "long number"),
@@ -67,10 +65,11 @@ def test_lexemes_cover_the_text_in_order_with_their_contexts():
         ("300", 0, "long number"),
         ("[0, 132, 32, 255]", 0, "table"),
         ("    lda PL.lo,x\n", 0, "code"),
-        ("φ", 0, "unicode"),
+        ("Ö", 0, "unicode"),
+        ("phi", 0, "expr"),
         ("%", 0, "expr"),
         ("T", 0, "text"),
-        ("\n      ", 0, "indent"),
+        ("\n    ", 4, "indent"),
         ("{", 1, "punct"),
     ],
 )
