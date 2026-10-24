@@ -19,42 +19,13 @@ import corpus as lift
 from unitracker.optimiser import tokenizer as tk
 
 ROOT = Path(__file__).resolve().parents[1]
-WRAPS = ("_SEP", "_LB", "_LC", "ADD", "MOD", "FLOORDIV", "CMP")
-_WRAP = re.compile(r"\n +")
-_INDENT = re.compile(r"(?<=\n) +")
 _LONG = re.compile(r"\d{3,}")
 _LONG_ARG = re.compile(r"(?<=[(,+-])\d{3,}")
-_NOTE = re.compile(r"([A-G]#?)(-?\d+)")
-_KEY = re.compile(r"([\s-]*)([a-z_][a-z_.]*): $")
+_KEY = re.compile(r"([\s-]*)([a-z_][a-z_.]*):$")
 
 
 def _edits(lexemes, pred, repl) -> list:
     return [(t.start_pos, t.end_pos, repl(t)) for t, ctx in lexemes if pred(t, ctx)]
-
-
-def comma_space(_text, _tree, lexemes) -> list:
-    """``, `` between flow items written ``,``."""
-    return _edits(lexemes, lambda t, _: t.type == "_SEP" and t == ", ", lambda _: ",")
-
-
-def colon_space(_text, _tree, lexemes) -> list:
-    """A key's ``: `` written ``:``."""
-    return _edits(lexemes, lambda t, c: t.endswith(": ") and c != "text", lambda t: t[:-1])
-
-
-def no_wrap(_text, _tree, lexemes) -> list:
-    """Flow collections and expressions on one line: a line wrap written as a space (none after
-    an opening bracket)."""
-    return _edits(
-        lexemes,
-        lambda t, _: t.type in WRAPS and "\n" in t,
-        lambda t: _WRAP.sub("" if t.type in ("_LB", "_LC") else " ", t),
-    )
-
-
-def indent_one(text, _tree, _lexemes) -> list:
-    """One space of indentation per level instead of two."""
-    return [(m.start(), m.end(), " " * (len(m.group()) // 2)) for m in _INDENT.finditer(text)]
 
 
 def hexadecimal(_text, _tree, lexemes) -> list:
@@ -98,74 +69,11 @@ def short_keys(_text, _tree, lexemes) -> list:
         while n < len(key) and any(o != key and o.startswith(key[:n]) for o in keys):
             n += 1
         short[key] = key[:n]
-    return [(t.start_pos, t.end_pos, f"{m.group(1)}{short[m.group(2)]}: ") for t, m in found]
+    return [(t.start_pos, t.end_pos, f"{m.group(1)}{short[m.group(2)]}:") for t, m in found]
 
 
-def sharp_lower(_text, _tree, lexemes) -> list:
-    """A sharp note's letter and ``#`` written as the letter in lower case (``A#2``: ``a2``)."""
-    return _edits(
-        lexemes,
-        lambda t, _: t.type in tk.NOTES and "#" in t,
-        lambda t: t[0].lower() + t[2:],
-    )
-
-
-def octave_elide(_text, tree, _lexemes) -> list:
-    """A phrase's note written without its octave where it is the previous note's."""
-    out = []
-    for phrase in tree.find_data("phrase"):
-        last = None
-        for event in phrase.find_data("event"):
-            m = _NOTE.fullmatch(event.children[0])
-            if m is None:
-                continue
-            if m.group(2) == last:
-                out.append((event.children[0].start_pos, event.children[0].end_pos, m.group(1)))
-            last = m.group(2)
-    return out
-
-
-def command_space(_text, _tree, lexemes) -> list:
-    """An event's commands introduced by a space instead of ``!`` (``C4 legato tick.freq:1``)."""
-    return _edits(
-        lexemes,
-        lambda t, c: t.startswith("!") and c != "text",
-        lambda t: " " + t[1:],
-    )
-
-
-def code_tab(_text, _tree, lexemes) -> list:
-    """A code block's lines indented by a tab instead of four spaces."""
-    return _edits(lexemes, lambda t, c: c == "code" and t == "    ", lambda _: "\t")
-
-
-def notes(text, tree, lexemes) -> list:
-    """:func:`sharp_lower` and :func:`octave_elide` together."""
-    elided = {e[0]: e for e in octave_elide(text, tree, lexemes)}
-    out = [
-        (start, end, repl if start not in elided else elided[start][2][0].lower())
-        for start, end, repl in sharp_lower(text, tree, lexemes)
-    ]
-    sharp = {e[0] for e in out}
-    return out + [e for start, e in elided.items() if start not in sharp]
-
-
-TRANSFORMS = {
-    "comma-space": comma_space,
-    "colon-space": colon_space,
-    "no-wrap": no_wrap,
-    "indent-1": indent_one,
-    "hex": hexadecimal,
-    "delta-tables": delta_tables,
-    "short-keys": short_keys,
-    "sharp-lower": sharp_lower,
-    "octave-elide": octave_elide,
-    "notes": notes,
-    "command-space": command_space,
-    "code-tab": code_tab,
-}
+TRANSFORMS = {"hex": hexadecimal, "delta-tables": delta_tables, "short-keys": short_keys}
 TOP = 20
-COMBINED = ("comma-space", "colon-space", "no-wrap", "notes", "command-space", "code-tab")
 
 
 def applied(text: str, edits: list) -> str:
@@ -193,7 +101,6 @@ def measure(text: str, encoders: list) -> dict:
     tree, lexemes = tk.lex(text)
     cats = tk.categories(text, lexemes)
     edits = {name: fn(text, tree, lexemes) for name, fn in TRANSFORMS.items()}
-    edits["combined"] = [e for name in COMBINED for e in edits[name]]
     variants = {name: applied(text, e) for name, e in edits.items()}
     res = {"chars": len(text), "events": tk.events(tree)}
     res["cat_chars"] = np.bincount(cats, minlength=len(tk.CATEGORIES)).tolist()
@@ -276,7 +183,7 @@ def _transforms(common: list, forms: list, encoders: list) -> str:
         "| transform | " + " | ".join(f"{f} {Path(n).name}" for f, n in pairs) + " |",
         "|---|" + "---:|" * len(pairs),
     ]
-    for name in [*TRANSFORMS, "combined"]:
+    for name in TRANSFORMS:
         cells = []
         for form, enc in pairs:
             base = sum(r["forms"][form][enc]["tokens"] for r in common)

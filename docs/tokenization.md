@@ -1,7 +1,7 @@
 # Tokenization
 
 How canonical documents (format 2.1) tokenize under LLM tokenizers, what costs the tokens, which
-printer changes would save them, and a BPE trained on documents.
+printer changes would save them (all adopted as format 2.2), and a BPE trained on documents.
 
 ## Method
 
@@ -24,10 +24,10 @@ printer changes would save them, and a BPE trained on documents.
   parser keeping every terminal; each character takes its terminal's category: `note`
   (`NOTE`, `NOTE_ATOM`), `number` (an integer of 1-2 digits), `long number` (3 or more, a call's
   arguments included), `name` (record names, templates, calls, parameters), `key` (the letters of
-  the grammar's literals: `ad: `, `!freq:`, `end`), `table` (a `tables:`/`regs:` list, whole),
+  the grammar's literals: `ad:`, ` freq:`, `end`), `table` (a `tables:`/`regs:` list, whole),
   `code` (a code block or `asm{}`, whole), `expr` (an expression's operators and symbols), `text`
   (meta values), `unicode` (any non-ASCII character), and otherwise by the character `punct`,
-  `space`, or `indent` (a newline and the indentation after it, a line wrap's too). A token takes
+  `space`, or `indent` (a newline and the space or tab after it). A token takes
   the category most of its characters have (ties to the earlier category in that order).
 - **Transforms** (`tools/tokens.py`): each is a set of edits on the grammar's terminals (so
   reversible by a printer that knows it), applied to every document and re-tokenized; the saving
@@ -147,13 +147,27 @@ separators: tokenizers merge a word with one leading space or punctuation charac
 format whose separators are single spaces before words (`command-space`) or vanish
 (`comma-space`) gets the separator free.
 
+## Format 2.2
+
+Format 2.2 is every recommended change, `indent-1` included; the transforms it implements are
+gone from `tools/tokens.py`. Measured with `tools/tokens.py` on a sample: 320 `.sid` drawn from
+`.tunecache` (seed 22), the 109 a direct lifter reads, in the `lifted`, `named` and `all` forms,
+the 2.1 documents from the 2.1 tools and the 2.2 ones from the 2.2 tools (the same documents,
+their models printed in 2.2, take within 0.1% of the same tokens). Saving of total tokens:
+
+| form | cl100k_base | o200k_base | qwen2.5 | 2.2 tokens/doc mean (cl100k_base) |
+|---|---:|---:|---:|---:|
+| lifted | 22.0% | 21.8% | 20.5% | 10633 |
+| named | 21.8% | 21.5% | 20.3% | 9624 |
+| all | 21.1% | 20.8% | 19.6% | 9279 |
+
 ## A document tokenizer
 
 `python -m unitracker.optimiser.tokenizer` trains a byte-level BPE (Hugging Face `tokenizers`)
 whose pre-tokenizer (`tokenizer.LEXEME`) splits a document into lexemes: a newline with its
-indentation, a note, a key or name with its `: `, a number, a punctuation run with its space,
-spaces. No token crosses a lexeme. The split is by the file stem's SHA-1 (1 in 10 held out), so
-a tune's forms fall in one split.
+indentation, a note, a key or name with the space before it and its `:`, a number, a
+punctuation run with its space, spaces. No token crosses a lexeme. The split is by the file
+stem's SHA-1 (1 in 10 held out), so a tune's forms fall in one split.
 
 Trained on the training split of the `lifted`, `named`, `single` and `all` forms (3045
 documents), evaluated on the held-out 268:

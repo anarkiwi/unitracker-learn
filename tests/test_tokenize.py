@@ -11,25 +11,24 @@ import optimiser_docs as D
 from unitracker.optimiser import tokenizer as tk
 
 DOC = (
-    "unitracker: 2.1\n"
-    "meta: {title: T, author: Ö}\n"
-    "voices: 1\n"
+    "unitracker:2.2\n"
+    "meta:{title:T,author:Ö}\n"
+    "voices:1\n"
     "tables:\n"
-    "  PL: [0, 132, 32, 255]\n"
+    " PL:[0,132,32,255]\n"
     "mod:\n"
-    "  vib(d): v + d*(phi % 4)\n"
-    "  up(c): |\n"
-    "    lda PL.lo,x\n"
-    "    adc #c\n"
-    "    sta v+1\n"
-    "    rts\n"
+    " vib(d):v + d*(phi % 4)\n"
+    " up(c):|\n"
+    "\tlda PL.lo,x\n"
+    "\tadc #c\n"
+    "\tsta v+1\n"
+    "\trts\n"
     "phrase:\n"
-    "  p1: [C4.i1={ad: 9, sr: 240, ctrl: [{ctrl: 65, note: +0}, {wait: 1, note: G#5}, end],"
-    " pw: up(300), freq: vib(2)},\n"
-    "    -, A#2, -*3, C4, off, C#4, D5!freq:1234]\n"
+    " p1:[C4.i1={ad:9,sr:240,ctrl:[{ctrl:65,note:+0},{wait:1,note:g5},end],"
+    "pw:up(300),freq:vib(2)},-,a2,-*3,C4,off,c,D5 freq:1234 legato]\n"
     "song:\n"
-    "  - play: [p1]\n"
-    "  - end\n"
+    " - play:[p1]\n"
+    " - end\n"
 )
 
 
@@ -52,8 +51,8 @@ def test_lexemes_cover_the_text_in_order_with_their_contexts():
     "sub,nth,cat",
     [
         ("C4", 0, "note"),
-        ("A#2", 0, "note"),
-        ("G#5", 0, "note"),
+        ("a2", 0, "note"),
+        ("g5", 0, "note"),
         ("off", 0, "note"),
         ("sr", 0, "key"),
         ("wait", 0, "key"),
@@ -63,13 +62,13 @@ def test_lexemes_cover_the_text_in_order_with_their_contexts():
         ("240", 0, "long number"),
         ("1234", 0, "long number"),
         ("300", 0, "long number"),
-        ("[0, 132, 32, 255]", 0, "table"),
-        ("    lda PL.lo,x\n", 0, "code"),
+        ("[0,132,32,255]", 0, "table"),
+        ("\tlda PL.lo,x\n", 0, "code"),
         ("Ö", 0, "unicode"),
         ("phi", 0, "expr"),
         ("%", 0, "expr"),
         ("T", 0, "text"),
-        ("\n    ", 4, "indent"),
+        ("\n ", 0, "indent"),
         ("{", 1, "punct"),
     ],
 )
@@ -85,7 +84,10 @@ def test_a_call_names_its_template_and_numbers_its_arguments():
     assert [tk.CATEGORIES[c] for c in cats[at : at + 6]] == ["name"] * 3 + ["punct", "number"] + [
         "punct"
     ]
-    assert _cat(DOC, cats, ": ", 0) == {"punct", "space"}
+    assert _cat(DOC, cats, " freq:", 0) == {"space", "key", "punct"}
+    assert _cat(DOC, cats, " legato", 0) == {"space", "key"}
+    at = DOC.index(",c,") + 1
+    assert tk.CATEGORIES[cats[at]] == "note"
 
 
 def test_a_token_takes_the_category_most_of_its_characters_have():
