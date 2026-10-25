@@ -135,7 +135,8 @@ def test_an_experiment_runs_end_to_end_and_resumes(exp, caplog):  # pylint: disa
             for d in index:
                 ids = flat[d["start"] + 1 : d["start"] + 1 + d["tokens"]]
                 assert flat[d["start"]] == learn.EOS and learn.EOS not in ids
-                text = exp.path("lifted", d["doc"]).read_text()
+                text = exp.text("lifted", d["doc"])
+                assert learn.META in text and "author" not in text
                 assert enc.decode(vocab[ids - 1]) == text and d["chars"] == len(text)
     rows = exp.results()
     assert len(rows) == 5 and rows[-1]["model"] == exp.cfg["ft_model"]
@@ -154,7 +155,19 @@ def test_an_experiment_runs_end_to_end_and_resumes(exp, caplog):  # pylint: disa
     ]
     assert [r["step"] for r in logged] == [2, 4]
     table = (exp.out / "results.md").read_text()
-    assert table.count("\n") == 7 and "| lifted | bpe | scratch |" in table
+    assert "| lifted | bpe | scratch |" in table and "| lifted | " in table.split("zstd_dict")[1]
+    base = json.loads((exp.out / "baselines.json").read_text())
+    assert (
+        0 < base["lifted"]["zstd_dict"] < base["lifted"]["xz"]
+        and "unigram_cl100k_base" in base["lifted"]
+    )
+    for r in exp.runs() + exp.runs(scratch=False):
+        probe = json.loads((exp.rundir(r) / "probe.json").read_text())
+        cats = probe["categories"]
+        assert cats["key"]["tokens"] > 0 and all(c["bits"] > 0 for c in cats.values())
+        ctx = exp.hp(r, "ctx")
+        hist = {str(h) for h in (16, 64, 256, ctx // 2, 3 * ctx // 4) if h <= 3 * ctx // 4}
+        assert set(probe["context"]) == hist and all(v > 0 for v in probe["context"].values())
     assert "stage report done" in caplog.text
     caplog.clear()
     exp.run()
@@ -188,7 +201,7 @@ def test_samples_continue_their_prompts_and_documents_parse_and_play(exp, monkey
     exp.cfg["tokenizers"] = ["bpe"]
     exp.cfg["forms"] = ["lifted"]
     exp.run()
-    run, text = learn.Run("lifted", "bpe", ""), _doc(3)
+    run, text = learn.Run("lifted", "bpe", ""), learn.META_LINE.sub(learn.META, _doc(3), count=1)
     play(text, ticks=50)
     prompts = exp.prompts(run)
     assert prompts["header"].shape == (2, prompts["header"].shape[1])
@@ -232,6 +245,32 @@ def test_a_share_of_training_windows_start_at_documents(exp):
     x, y = exp.windows(run, data[:20], np.random.default_rng(0), 2)
     assert (x[:, 20:] == learn.EOS).all() and (y[:, :19] == x[:, 1:20]).all()
     assert (y[:, 19:] == -100).all()
+
+
+def test_meta_is_kept_where_asked(exp):
+    exp.cfg["meta"] = True
+    assert "author:A" in exp.text("lifted", learn.shared.name({"path": "t0", "md5": "0" * 32}))
+
+
+def test_an_error_is_located_in_its_innermost_open_construct():
+    doc = "a:[b,{c:d(1,"
+    assert [learn.where(doc, n) for n in (1, 4, 8, 12)] == ["top", "list", "record", "call"]
+    assert learn.where("a:[b](c)", 8) == "top"
+
+
+def test_a_pretrained_models_eos_is_fetched_once(monkeypatch):
+    import transformers  # pylint: disable=import-outside-toplevel
+
+    calls = []
+
+    def config(name):
+        calls.append(name)
+        return type("C", (), {"eos_token_id": [7, 8]})
+
+    monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", config)
+    learn.eos_id.cache_clear()
+    assert learn.eos_id("m") == learn.eos_id("m") == 7 and calls == ["m"]
+    learn.eos_id.cache_clear()
 
 
 def test_status_reports_stages_corpus_runs_and_the_log(exp):

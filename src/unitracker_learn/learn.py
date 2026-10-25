@@ -7,9 +7,11 @@ Usage: ``python tools/learn.py {run,status,launch} [--preset smoke|full] [--set 
 
 import argparse
 import csv
+import functools
 import hashlib
 import json
 import logging
+import lzma
 import math
 import os
 import re
@@ -17,7 +19,7 @@ import shlex
 import subprocess
 import sys
 import time
-from collections import namedtuple
+from collections import Counter, namedtuple
 from pathlib import Path
 
 import numpy as np
@@ -36,6 +38,9 @@ Run.name = property(lambda r: ".".join([r.form, r.tok] + [r.base.split("/")[-1]]
 LN2 = math.log(2)
 HEADER = "unitracker:2.3\n"
 SAMPLES = ("header", "continue")
+META = "meta:{title:-}"
+META_LINE = re.compile(r"(?m)^meta:\{.*\}$")
+OPEN = {"(": "call", "[": "list", "{": "record"}
 COMMON = {
     "player": "GoatTracker_V2|SidWizard|DefMon",
     "held": [0.05, 0.1],
@@ -51,6 +56,8 @@ COMMON = {
     "ft_micro": 1,
     "ft_batch_eval": 1,
     "doc_starts": 0.25,
+    "meta": False,
+    "probe_docs": 96,
 }
 PRESETS = {
     "smoke": COMMON
@@ -140,6 +147,27 @@ def split(groups: dict, held: list) -> dict:
     return out
 
 
+@functools.cache
+def eos_id(base: str) -> int:
+    """A pretrained model's end of document id, its configuration fetched once."""
+    from transformers import AutoConfig  # pylint: disable=import-outside-toplevel,import-error
+
+    eos = AutoConfig.from_pretrained(base).eos_token_id
+    return eos[0] if isinstance(eos, list) else eos
+
+
+def where(doc: str, pos: int) -> str:
+    """The construct open at ``pos`` of a document: its innermost unclosed bracket's kind (a
+    call, list or record), else ``top``."""
+    stack = []
+    for ch in doc[:pos]:
+        if ch in OPEN:
+            stack.append(OPEN[ch])
+        elif ch in ")]}" and stack:
+            stack.pop()
+    return stack[-1] if stack else "top"
+
+
 def device():
     """``(device, autocast)``: the GPU with bf16 autocast when there is one, else the CPU."""
     import torch  # pylint: disable=import-outside-toplevel,import-error
@@ -191,6 +219,7 @@ class Experiment:  # pylint: disable=too-many-public-methods
             ("eval", lambda: self.each(self.evaluate)),
             ("sample", lambda: self.each(self.sample)),
             ("finetune", self.finetune),
+            ("probe", self.probe),
             ("report", self.report),
         ]
 
@@ -279,11 +308,18 @@ class Experiment:  # pylint: disable=too-many-public-methods
         out = json.loads((self.out / "split.json").read_text(encoding="utf-8"))
         return {d: v for d, v in out.items() if which in (None, v["split"])}
 
+    def text(self, form: str, doc: str) -> str:
+        """A document's form as the models read it: its meta line :data:`META` unless ``meta``
+        (titles and authors are no part of a tune)."""
+        text = self.path(form, doc).read_text(encoding="utf-8")
+        return text if self.cfg["meta"] else META_LINE.sub(META, text, count=1)
+
     def train_bpe(self) -> None:
         """A document BPE trained on the training split of every form."""
         if "bpe" in self.cfg["tokenizers"]:
-            paths = [self.path(f, d) for f in self.cfg["forms"] for d in self.docs("train")]
-            tk.train(paths, self.cfg["vocab"], self.out / "bpe", progress=False)
+            docs = [(f, d) for f in self.cfg["forms"] for d in self.docs("train")]
+            text = lambda fd: self.text(*fd)  # pylint: disable=unnecessary-lambda-assignment
+            tk.train(docs, self.cfg["vocab"], self.out / "bpe", progress=False, text=text)
 
     def encoder(self, tok: str):
         """Tokenizer ``tok``'s encoder: the document BPE, or a :data:`tk.REFERENCES` one."""
@@ -302,7 +338,7 @@ class Experiment:  # pylint: disable=too-many-public-methods
         for tok in self.cfg["tokenizers"]:
             enc, ids = self.encoder(tok), {}
             for form in progress(self.cfg["forms"], desc=f"encode {tok}", unit="form"):
-                texts = [self.path(form, d).read_text(encoding="utf-8") for d in names]
+                texts = [self.text(form, d) for d in names]
                 ids[form] = (enc.encode(texts), [len(t) for t in texts])
             vocab = np.unique(np.concatenate([np.concatenate(v[0]) for v in ids.values()]))
             out = self.data(tok)
@@ -333,12 +369,7 @@ class Experiment:  # pylint: disable=too-many-public-methods
 
     def eos(self, run: Run) -> int:
         """A run's end of document id: :data:`EOS`, or its pretrained model's."""
-        if not run.base:
-            return EOS
-        from transformers import AutoConfig  # pylint: disable=C0415,E0401
-
-        eos = AutoConfig.from_pretrained(run.base).eos_token_id
-        return eos[0] if isinstance(eos, list) else eos
+        return eos_id(run.base) if run.base else EOS
 
     def lut(self, run: Run):
         """Each model id's id for a run's model: for a fine-tune its tokenizer's (EOS its
@@ -613,6 +644,7 @@ class Experiment:  # pylint: disable=too-many-public-methods
                 recs.append(rec)
             keys = ("ended", "parses", "plays", "valid")
             out |= {f"{kind}_{k}": float(np.mean([r[k] for r in recs])) for k in keys}
+            out[f"{kind}_where"] = dict(Counter(r["where"] for r in recs if "where" in r))
             out[kind] = recs
         (rd / "sample.json").write_text(json.dumps(out, indent=1), "utf-8")
         log.info("%s: %s", rd.name, {k: v for k, v in out.items() if k not in SAMPLES})
@@ -641,6 +673,7 @@ class Experiment:  # pylint: disable=too-many-public-methods
                 line, col = int(at[1]), int(at[2])
                 pos = sum(len(ln) + 1 for ln in doc.split("\n")[: line - 1]) + col - 1
                 rec["valid"] = min(1.0, max(0.0, (pos - start) / max(1, len(doc) - start)))
+                rec["where"] = where(doc, pos)
         return rec
 
     def finetune(self) -> None:
@@ -663,6 +696,109 @@ class Experiment:  # pylint: disable=too-many-public-methods
             self.train(run)
             self.evaluate(run)
             self.sample(run)
+
+    def probe(self) -> None:
+        """``baselines.json`` (:meth:`baselines`) and per run ``probe.json``
+        (:meth:`probe_run`)."""
+        if not (self.out / "baselines.json").exists():
+            rec = {form: self.baselines(form) for form in self.cfg["forms"]}
+            (self.out / "baselines.json").write_text(json.dumps(rec, indent=1), "utf-8")
+        for run in self.runs() + self.runs(scratch=False):
+            self.probe_run(run)
+
+    def baselines(self, form: str) -> dict:
+        """The test split's bits per song tick under models that know no structure: per
+        tokenizer its training split's unigram frequencies, xz, and zstd with up to 8 MiB of the
+        training split (seeded order) as a raw content dictionary, within its level 19 window."""
+        import zstandard  # pylint: disable=import-outside-toplevel
+
+        test = list(self.docs("test"))
+        ticks = sum(v["ticks"] for v in self.docs("test").values())
+        texts = [self.text(form, d).encode() for d in test]
+        train = [self.text(form, d).encode() for d in self.docs("train")]
+        order = np.random.default_rng(self.cfg["seed"]).permutation(len(train))
+        raw = b"".join(train[i] for i in order)[: 8 << 20]
+        zdict = zstandard.ZstdCompressionDict(raw, dict_type=zstandard.DICT_TYPE_RAWCONTENT)
+        zc = zstandard.ZstdCompressor(level=19, dict_data=zdict)
+        out = {
+            "raw": 8 * sum(map(len, texts)) / ticks,
+            "xz": 8 * sum(len(lzma.compress(t, preset=9 | lzma.PRESET_EXTREME)) for t in texts),
+            "zstd_dict": 8 * sum(len(zc.compress(t)) for t in texts) / ticks,
+        }
+        out["xz"] /= ticks
+        for tok in self.cfg["tokenizers"]:
+            uni = self.unigram(tok, form)
+            data = np.load(self.data(tok) / f"{form}.test.npy", mmap_mode="r")
+            out[f"unigram_{tok}"] = float(uni[data[1:]].sum()) / ticks
+        log.info("%s baselines (bits/tick): %s", form, out)
+        return out
+
+    def unigram(self, tok: str, form: str) -> np.ndarray:
+        """Each model id's surprisal (bits) under the training split's token frequencies
+        (add-half smoothed)."""
+        data = np.load(self.data(tok) / f"{form}.train.npy", mmap_mode="r")
+        size = len(np.load(self.data(tok) / "vocab.npy")) + 1
+        count = np.bincount(data, minlength=size) + 0.5
+        return -np.log2(count / count.sum())
+
+    def probe_run(self, run: Run) -> None:  # pylint: disable=too-many-locals
+        """``probe.json``: the best model's bits per token by grammar category (beside the
+        unigram's) over the first context of ``probe_docs`` test documents, and over their
+        last quarter context, the bits per token with each length of history."""
+        import torch  # pylint: disable=import-outside-toplevel,import-error
+
+        rd = self.rundir(run)
+        if (rd / "probe.json").exists() or not (rd / "best.pt").exists():
+            return
+        model, ctx, (dev, amp) = self.trained(run), self.hp(run, "ctx"), device()
+        data = np.load(self.data(run.tok) / f"{run.form}.test.npy", mmap_mode="r")
+        index = json.loads((self.data(run.tok) / f"{run.form}.test.json").read_text("utf-8"))
+        index = index[:: max(1, len(index) // self.cfg["probe_docs"])]
+        uni, enc, lut = self.unigram(run.tok, run.form), self.encoder(run.tok), self.lut(run)
+        size = len(tk.CATEGORIES)
+        cats = {"tokens": np.zeros(size), "bits": np.zeros(size), "unigram": np.zeros(size)}
+        start = 3 * ctx // 4
+        hist = [h for h in (16, 64, 256, ctx // 2, start) if h <= start]
+        context = {h: [0.0, 0] for h in hist}
+
+        for d in progress(index, desc=f"probe {rd.name}", unit="doc"):
+            toks = np.asarray(data[d["start"] : d["start"] + d["tokens"] + 1], np.int64)
+            x = toks[:ctx]
+            x_t = torch.from_numpy(x if lut is None else lut[x]).to(dev)[None]
+            y_t = torch.nn.functional.pad(x_t[:, 1:], (0, 1), value=-100)
+            with torch.no_grad(), amp:
+                hidden = model.get_decoder()(input_ids=x_t).last_hidden_state
+                logits = model.get_output_embeddings()(hidden).float()[0, :-1]
+            per = torch.nn.functional.cross_entropy(logits, y_t[0, :-1], reduction="none")
+            per = per.cpu().numpy() / LN2
+            text = self.text(run.form, d["doc"])
+            starts, ends = enc.spans(text)
+            cat = tk.attribute(tk.categories(text), starts, ends)[: len(per)]
+            np.add.at(cats["tokens"], cat, 1)
+            np.add.at(cats["bits"], cat, per[: len(cat)])
+            np.add.at(cats["unigram"], cat, uni[x[1 : len(cat) + 1]])
+            if len(toks) < ctx:
+                continue
+            for h in hist:
+                w = toks[start - h : ctx]
+                y = np.full(len(w), -100, np.int64)
+                y[h - 1 : -1] = w[h:]
+                xw = w if lut is None else lut[w]
+                yw = y if lut is None else np.where(y < 0, y, lut[np.maximum(y, 0)])
+                xw, yw = torch.from_numpy(xw).to(dev)[None], torch.from_numpy(yw).to(dev)[None]
+                with torch.no_grad(), amp:
+                    context[h][0] += nll(model, xw, yw).item() / LN2
+                context[h][1] += ctx - start
+        rec = {
+            "categories": {
+                c: {k: float(v[i]) for k, v in cats.items()}
+                for i, c in enumerate(tk.CATEGORIES)
+                if cats["tokens"][i]
+            },
+            "context": {str(h): b / max(n, 1) for h, (b, n) in context.items()},
+        }
+        (rd / "probe.json").write_text(json.dumps(rec, indent=1), encoding="utf-8")
+        log.info("%s probe: %s", rd.name, rec["context"])
 
     def results(self) -> list:
         """Each run's row: its form, tokenizer, base model and its stages' records' scalars."""
@@ -701,6 +837,14 @@ class Experiment:  # pylint: disable=too-many-public-methods
         for r in rows:
             lines.append("| " + " | ".join(f.format(r[k]) if k in r else "" for k, _, f in cols))
             lines[-1] += " |"
+        if (self.out / "baselines.json").exists():
+            base = json.loads((self.out / "baselines.json").read_text(encoding="utf-8"))
+            names = list(next(iter(base.values())))
+            lines += ["", "| form | " + " | ".join(names) + " |", "|---|" + "---:|" * len(names)]
+            lines += [
+                f"| {f} | " + " | ".join(f"{b[k]:.3f}" for k in names) + " |"
+                for f, b in base.items()
+            ]
         text = "\n".join(lines) + "\n"
         (self.out / "results.md").write_text(text, encoding="utf-8")
         log.info("results\n%s", text)

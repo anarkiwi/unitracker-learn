@@ -31,12 +31,13 @@ lossy mode's tolerances; their bits are of that tune.
 | `corpus` | each tune's forms (`tools/corpus.py forms`), cached per tune in `out/learn/corpus/`, shared by the experiments | `../corpus/<form>/<tune>.yaml` |
 | `split` | the tunes every form has, split by composer (the HVSC musician directory; a tune elsewhere is its own group): groups in SHA-1 order fill test (10% of tunes), then validation (5%), the rest train, so no composer's style crosses splits | `split.json` |
 | `tokenizers` | the document BPE (`unitracker.optimiser.tokenizer`) trained on the training split of every form | `bpe/` |
-| `encode` | each form and split's documents per tokenizer, each after an end-of-document token, the ids remapped to those the corpus uses | `data/<tokenizer>/` |
+| `encode` | each form and split's documents per tokenizer (the models' documents throughout have their meta line (titles and authors, no part of the tune) replaced by `meta:{title:-}`; `--set meta=true` keeps it), each after an end-of-document token, the ids remapped to those the corpus uses | `data/<tokenizer>/` |
 | `train` | per form and tokenizer, a Llama-shaped decoder from scratch: training windows at random offsets, a quarter of them at document starts (`doc_starts`), AdamW with warmup and cosine decay, the best checkpoint by validation loss; the loss is applied to the output head a chunk of positions at a time, so no window's logits over a large vocabulary are held at once | `runs/<form>.<tokenizer>/` |
 | `eval` | each test document's bits under the best checkpoint, every token scored once with up to a context of history (windows half a context apart) | `eval.json` |
-| `sample` | documents sampled (temperature 1, a context window sliding half a context at a time) after two kinds of prompt: `header`, the document header `unitracker:2.3`; `continue`, the first `prompt_tokens` of a test tune. Each is parsed and played; `valid` is the share of its generated characters before the first parse error | `samples/<kind>-<i>.yaml`, `sample.json` |
+| `sample` | documents sampled (temperature 1, a context window sliding half a context at a time) after two kinds of prompt: `header`, the document header `unitracker:2.3`; `continue`, the first `prompt_tokens` of a test tune. Each is parsed and played; `valid` is the share of its generated characters before the first parse error, and `where` the construct (call, list, record, top level) open there | `samples/<kind>-<i>.yaml`, `sample.json` |
 | `finetune` | `ft_model` fine-tuned on the `ft_forms` forms (named, or a number: that many with the fewest from-scratch bits per tick) in its own tokenizer's ids, then evaluated and sampled as above | `finetune.json`, `runs/<form>.<tokenizer>.<model>/` |
-| `report` | a table of every run | `results.md`, `results.json` |
+| `probe` | the test split's bits per tick under models that know no structure (each tokenizer's training unigram, xz, zstd with up to 8 MiB of training text as its dictionary), and per run the best model's bits per token by grammar category beside the unigram's, and the bits per token of a context's last quarter with each length of history | `baselines.json`, `runs/*/probe.json` |
+| `report` | a table of every run and the baselines | `results.md`, `results.json` |
 
 Presets (`--preset`, each key overridable with `--set KEY=VALUE`, JSON values):
 
