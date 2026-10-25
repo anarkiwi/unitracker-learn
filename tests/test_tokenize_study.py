@@ -80,7 +80,16 @@ def test_the_study_measures_forms_categories_and_transforms(forms_root, capsys):
 
 def test_forms_are_the_optimisers_and_lossy_when_it_has_it(monkeypatch):
     table = corpus.forms()
-    assert list(table) == ["lifted", "named", "single", "all", "lossy", "lossy-single", "lossy-all"]
+    base = ["lifted", "named", "single", "all", "lossy", "lossy-single", "lossy-all"]
+    assert list(corpus.forms(ablations=False)) == base
+    assert list(table) == base + [
+        "lossy-nophrases",
+        "lossy-nophrases-single",
+        "lossy-nophrases-all",
+    ]
+    assert [p for p, _ in table["lossy-nophrases"][1]["order"]] == [
+        p for p, _ in corpus.PASSES if p != "phrases"
+    ]
     assert table["lossy"] == ("lifted", {"lossy": dict(TOLERANCES)})
     assert table["lossy-all"] == ("lossy", {"inline": "all"})
     assert corpus.with_bases(["lossy-all", "single"]) == [
