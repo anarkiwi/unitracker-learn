@@ -1,21 +1,24 @@
 # Learnability
 
-How well language models learn unitracker documents: which document form and tokenizer a model
-learns most from, and whether a pretrained LLM (Qwen2.5) learns to write tunes that play.
+How well language models learn unitracker documents in their intended form, lossy and inline
+(`lossy-single`, `lossy-all`): which form and tokenizer a model learns most from, and whether a
+pretrained LLM (Qwen2.5) learns to write tunes that play. The lossless forms are left out: their
+code modulators are the native players' 6502 routines, the same boilerplate in every tune of a
+player.
 
 ## Questions
 
 | question | runs | measure |
 |---|---|---|
 | which form and tokenizer is most learnable, without prior knowledge | a decoder trained from scratch per form and tokenizer, the same shape, steps and tokens per step | held-out bits per song tick |
-| does a pretrained LLM learn to write unitracker tunes, and how much does its prior help | Qwen2.5-0.5B fine-tuned on the forms the from-scratch runs score best | the same, beside the from-scratch runs on the same form |
+| does a pretrained LLM learn to write unitracker tunes, and how much does its prior help | Qwen2.5-0.5B fine-tuned on the intended forms, lossy and inline (`lossy-single`, `lossy-all`) | the same, beside the from-scratch runs on the same form |
 | are the documents a model writes tunes | every run's samples, from the document header and continuing held-out tunes' openings | the share that end, parse, and play on unitracker-player, and the share of generated characters before the first parse error |
 
 Bits per song tick (a document's total next-token surprisal over its song length,
 `tools/corpus.py` `song_ticks`) compares across forms and tokenizers, where loss per token does
 not: a form or tokenizer that spends fewer tokens on a tune is not penalised for each token
-carrying more. The lossy form's documents play a different grid; their bits are of a different
-(approximated) tune.
+carrying more. The lossy forms' documents play an approximation of the native grid, within the
+lossy mode's tolerances; their bits are of that tune.
 
 ## Method
 
@@ -32,15 +35,15 @@ carrying more. The lossy form's documents play a different grid; their bits are 
 | `train` | per form and tokenizer, a Llama-shaped decoder from scratch: training windows at random offsets, a quarter of them at document starts (`doc_starts`), AdamW with warmup and cosine decay, the best checkpoint by validation loss; the loss is applied to the output head a chunk of positions at a time, so no window's logits over a large vocabulary are held at once | `runs/<form>.<tokenizer>/` |
 | `eval` | each test document's bits under the best checkpoint, every token scored once with up to a context of history (windows half a context apart) | `eval.json` |
 | `sample` | documents sampled (temperature 1, a context window sliding half a context at a time) after two kinds of prompt: `header`, the document header `unitracker:2.3`; `continue`, the first `prompt_tokens` of a test tune. Each is parsed and played; `valid` is the share of its generated characters before the first parse error | `samples/<kind>-<i>.yaml`, `sample.json` |
-| `finetune` | `ft_model` fine-tuned on the `ft_forms` forms with the fewest from-scratch bits per tick (its own tokenizer's ids), then evaluated and sampled as above | `finetune.json`, `runs/<form>.<tokenizer>.<model>/` |
+| `finetune` | `ft_model` fine-tuned on the `ft_forms` forms (named, or a number: that many with the fewest from-scratch bits per tick) in its own tokenizer's ids, then evaluated and sampled as above | `finetune.json`, `runs/<form>.<tokenizer>.<model>/` |
 | `report` | a table of every run | `results.md`, `results.json` |
 
 Presets (`--preset`, each key overridable with `--set KEY=VALUE`, JSON values):
 
 | preset | tunes | forms | from scratch | fine-tune |
 |---|---|---|---|---|
-| `smoke` | 8 | `lifted`, `named` | 2 layers of 64, context 256, 40 steps | the best form, 4 steps |
-| `full` | all | `lifted`, `named`, `all`, `lossy-all` | 8 layers of 512 (26M parameters), context 2048, 5000 steps of 32 windows | Qwen2.5-0.5B on the best 2 forms, context 8192 (four times the from-scratch context), 2000 steps of 8 windows, learning rate 5e-5 |
+| `smoke` | 8 | `lossy-single`, `lossy-all` | 2 layers of 64, context 256, 40 steps | the best form, 4 steps |
+| `full` | all | `lossy-single`, `lossy-all` | 8 layers of 512 (26M parameters), context 2048, 5000 steps of 32 windows | Qwen2.5-0.5B on `lossy-single` and `lossy-all`, context 8192 (four times the from-scratch context), 2000 steps of 8 windows, learning rate 5e-5 |
 
 Both tokenizers are the document BPE (`vocab`) and Qwen2.5's (`qwen2.5`), whose ids the fine-tune
 reads. Both kinds of run see the same tokens per step (65536).
