@@ -235,8 +235,9 @@ def bpe():
     return tok
 
 
-def train(paths: list, vocab: int, out: Path, progress: bool = True):
-    """A BPE of ``vocab`` tokens trained on the documents ``paths``, saved under ``out``."""
+def train(paths: list, vocab: int, out: Path, progress: bool = True, text=None):
+    """A BPE of ``vocab`` tokens trained on the documents ``paths`` (each read by ``text``, else
+    as it is), saved under ``out``."""
     from tokenizers import pre_tokenizers, trainers  # pylint: disable=import-outside-toplevel
 
     tok = bpe()
@@ -245,7 +246,8 @@ def train(paths: list, vocab: int, out: Path, progress: bool = True):
         initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
         show_progress=False,
     )
-    texts = (p.read_text(encoding="utf-8") for p in tqdm(paths, unit="doc", disable=not progress))
+    text = text or (lambda p: p.read_text(encoding="utf-8"))
+    texts = (text(p) for p in tqdm(paths, unit="doc", disable=not progress))
     tok.train_from_iterator(texts, trainer, length=len(paths))
     out.mkdir(parents=True, exist_ok=True)
     tok.save(str(out / "tokenizer.json"))
