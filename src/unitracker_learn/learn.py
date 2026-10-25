@@ -12,6 +12,7 @@ import json
 import logging
 import math
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -33,6 +34,8 @@ EOS = 0
 Run = namedtuple("Run", "form tok base")
 Run.name = property(lambda r: ".".join([r.form, r.tok] + [r.base.split("/")[-1]] * bool(r.base)))
 LN2 = math.log(2)
+HEADER = "unitracker:2.3\n"
+SAMPLES = ("header", "continue")
 COMMON = {
     "player": "GoatTracker_V2|SidWizard|DefMon",
     "held": [0.05, 0.1],
@@ -45,8 +48,9 @@ COMMON = {
     "ft_tokenizer": "qwen2.5",
     "ft_forms": 2,
     "ft_lr": 5e-5,
-    "ft_micro": 2,
-    "ft_batch_eval": 2,
+    "ft_micro": 1,
+    "ft_batch_eval": 1,
+    "doc_starts": 0.25,
 }
 PRESETS = {
     "smoke": COMMON
@@ -68,7 +72,10 @@ PRESETS = {
         "val_windows": 8,
         "samples": 2,
         "sample_tokens": 512,
+        "prompt_tokens": 32,
         "play_ticks": 300,
+        "ft_ctx": 512,
+        "ft_batch": 2,
         "ft_forms": 1,
         "ft_steps": 4,
         "ft_warmup": 1,
@@ -93,6 +100,9 @@ PRESETS = {
         "val_windows": 256,
         "samples": 16,
         "sample_tokens": 16384,
+        "prompt_tokens": 512,
+        "ft_ctx": 8192,
+        "ft_batch": 8,
         "ft_steps": 2000,
         "ft_warmup": 100,
         "ft_eval_every": 250,
@@ -135,6 +145,30 @@ def device():
 
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     return dev, torch.autocast(dev, torch.bfloat16, enabled=dev == "cuda")
+
+
+def nll(model, x, y, chunk: int = 1024):
+    """Each window's summed loss (nats) of its targets ``y`` (-100 ignored) under a causal LM,
+    its output head applied ``chunk`` positions at a time (recomputed in the backward pass), so
+    no window's logits over the vocabulary are held at once."""
+    # pylint: disable=import-outside-toplevel,import-error
+    import torch
+    from torch.nn.functional import cross_entropy
+    from torch.utils.checkpoint import checkpoint
+
+    hidden, head = model.get_decoder()(input_ids=x).last_hidden_state, model.get_output_embeddings()
+
+    def part(h, t):
+        logits = head(h).float()
+        flat = cross_entropy(logits.flatten(0, 1), t.flatten(), reduction="none")
+        return flat.view(t.shape).sum(1)
+
+    total = 0
+    for at in range(0, x.shape[1], chunk):
+        args = (hidden[:, at : at + chunk], y[:, at : at + chunk])
+        grad = torch.is_grad_enabled()
+        total = total + (checkpoint(part, *args, use_reentrant=False) if grad else part(*args))
+    return total
 
 
 class Experiment:  # pylint: disable=too-many-public-methods
@@ -336,17 +370,25 @@ class Experiment:  # pylint: disable=too-many-public-methods
         )
         return LlamaForCausalLM(shape)
 
-    def windows(self, run: Run, data: np.ndarray, rng, n: int):
-        """``n`` windows of ``ctx`` tokens at random offsets of ``data`` (EOS padded), in the
-        run's model's ids."""
+    def windows(self, run: Run, data, rng, n: int, starts=None):  # pylint: disable=R0914
+        """``(x, y)``: ``n`` windows of ``ctx`` tokens of ``data`` (EOS padded) in the run's model's
+        ids at random offsets (a ``doc_starts`` share at random documents' ``starts`` if given),
+        and each position's next-token target (-100 past the data)."""
         import torch  # pylint: disable=import-outside-toplevel,import-error
 
-        ctx, lut = self.cfg["ctx"], self.lut(run)
-        out = np.full((n, ctx), EOS, np.int64)
-        for i, a in enumerate(rng.integers(0, max(1, len(data) - ctx), n)):
+        ctx, lut = self.hp(run, "ctx"), self.lut(run)
+        out, y = np.full((n, ctx), EOS, np.int64), np.full((n, ctx), -100, np.int64)
+        at = rng.integers(0, max(1, len(data) - ctx), n)
+        if starts is not None and len(starts):
+            k = round(n * self.cfg["doc_starts"])
+            at[:k] = rng.choice(starts, k)
+        for i, a in enumerate(at):
             w = data[a : a + ctx]
             out[i, : len(w)] = w
-        return torch.from_numpy(out if lut is None else lut[out])
+            y[i, : len(w) - 1] = out[i, 1 : len(w)]
+        if lut is not None:
+            out, y = lut[out], np.where(y < 0, y, lut[np.maximum(y, 0)])
+        return torch.from_numpy(out), torch.from_numpy(y)
 
     def train(self, run: Run) -> None:  # pylint: disable=too-many-locals,too-many-statements
         """A run's model trained ``steps`` batches of random windows (``micro`` a pass; AdamW,
@@ -384,6 +426,8 @@ class Experiment:  # pylint: disable=too-many-public-methods
         train = np.load(self.data(run.tok) / f"{run.form}.train.npy", mmap_mode="r")
         val = np.load(self.data(run.tok) / f"{run.form}.val.npy", mmap_mode="r")
         val_x = self.windows(run, val, np.random.default_rng(c["seed"]), c["val_windows"])
+        index = json.loads((self.data(run.tok) / f"{run.form}.train.json").read_text("utf-8"))
+        starts, batch = np.array([d["start"] for d in index], np.int64), self.hp(run, "batch")
         params = sum(p.numel() for p in model.parameters())
         log.info("%s: %d parameters, %d training tokens", rd.name, params, len(train))
         pbar = progress(
@@ -393,12 +437,15 @@ class Experiment:  # pylint: disable=too-many-public-methods
             for step in pbar:
                 start = time.time()
                 model.train()
-                x = self.windows(run, train, np.random.default_rng([c["seed"], step]), c["batch"])
+                rng = np.random.default_rng([c["seed"], step])
+                x, y = self.windows(run, train, rng, batch, starts)
+                count = int((y >= 0).sum())
                 opt.zero_grad(set_to_none=True)
                 loss = 0.0
-                for b in x.to(dev).split(self.hp(run, "micro")):
+                micro = self.hp(run, "micro")
+                for b, t in zip(x.to(dev).split(micro), y.to(dev).split(micro)):
                     with amp:
-                        part = model(input_ids=b, labels=b).loss * len(b) / len(x)
+                        part = nll(model, b, t).sum() / count
                     part.backward()
                     loss += part.detach()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -419,7 +466,7 @@ class Experiment:  # pylint: disable=too-many-public-methods
                     torch.save(model.state_dict(), rd / "best.pt")
                 ck = {"model": model.state_dict(), "opt": opt.state_dict()}
                 torch.save(ck | {"sched": sched.state_dict(), "state": state}, rd / "last.pt")
-        seen = steps * c["batch"] * c["ctx"]
+        seen = steps * batch * self.hp(run, "ctx")
         rec = {"params": params, "train_tokens": len(train), "seen_tokens": seen}
         rec |= {"best_val": state["best"], "seconds": state["seconds"]}
         rec["tokens_per_second"] = seen / max(state["seconds"], 1e-9)
@@ -427,17 +474,17 @@ class Experiment:  # pylint: disable=too-many-public-methods
         if run.base:
             (rd / "last.pt").unlink()
 
-    def loss(self, run: Run, model, x) -> float:
-        """Mean next-token loss (nats) over windows ``x``."""
+    def loss(self, run: Run, model, windows: tuple) -> float:
+        """Mean next-token loss (nats) over :meth:`windows`' targets."""
         import torch  # pylint: disable=import-outside-toplevel,import-error
 
         dev, amp = device()
         model.eval()
-        total = 0.0
+        (x, y), total, step = windows, 0.0, self.hp(run, "batch_eval")
         with torch.no_grad(), amp:
-            for b in x.split(self.hp(run, "batch_eval")):
-                total += model(input_ids=b.to(dev), labels=b.to(dev)).loss.item() * len(b)
-        return total / len(x)
+            for b, t in zip(x.split(step), y.split(step)):
+                total += nll(model, b.to(dev), t.to(dev)).sum().item()
+        return total / int((y >= 0).sum())
 
     def trained(self, run: Run):
         """A run's best model, for inference."""
@@ -447,11 +494,11 @@ class Experiment:  # pylint: disable=too-many-public-methods
         model.load_state_dict(torch.load(self.rundir(run) / "best.pt", map_location="cpu"))
         return model.to(device()[0]).eval()
 
-    def chunks(self, n: int) -> list:
+    def chunks(self, n: int, ctx: int) -> list:
         """The windows scoring a document of ``n`` tokens, ``(start, end, first)``, half a
         context apart, ``first`` the first position each scores: every position after the
         first scored once, with up to a context of history."""
-        ctx, out, first, begin = self.cfg["ctx"], [], 1, 0
+        out, first, begin = [], 1, 0
         while True:
             end = min(begin + ctx, n)
             out.append((begin, end, first))
@@ -464,12 +511,11 @@ class Experiment:  # pylint: disable=too-many-public-methods
         leading EOS, the trailing EOS included) and the split's bits per song tick, character
         and token."""
         import torch  # pylint: disable=import-outside-toplevel,import-error
-        from torch.nn import functional as F  # pylint: disable=C0415,E0401
 
         rd = self.rundir(run)
         if (rd / "eval.json").exists():
             return
-        (dev, amp), model, ctx = device(), self.trained(run), self.cfg["ctx"]
+        (dev, amp), model, ctx = device(), self.trained(run), self.hp(run, "ctx")
         data = np.load(self.data(run.tok) / f"{run.form}.test.npy", mmap_mode="r")
         index = json.loads((self.data(run.tok) / f"{run.form}.test.json").read_text("utf-8"))
         lut = self.lut(run)
@@ -477,7 +523,7 @@ class Experiment:  # pylint: disable=too-many-public-methods
         jobs = []
         for k, d in enumerate(index):
             toks = data[d["start"] : d["start"] + d["tokens"] + 2]
-            jobs += [(k, toks[b:e], f - b) for b, e, f in self.chunks(len(toks))]
+            jobs += [(k, toks[b:e], f - b) for b, e, f in self.chunks(len(toks), ctx)]
         bits, step = np.zeros(len(index)), self.hp(run, "batch_eval")
         for at in progress(range(0, len(jobs), step), desc=f"eval {rd.name}", unit="batch"):
             batch = jobs[at : at + step]
@@ -487,10 +533,7 @@ class Experiment:  # pylint: disable=too-many-public-methods
                 x[i, : len(w)] = w
                 y[i, first - 1 : len(w) - 1] = w[first:]
             with torch.no_grad(), amp:
-                logits = model(input_ids=torch.from_numpy(x).to(dev)).logits.float()
-            nats = F.cross_entropy(
-                logits.transpose(1, 2), torch.from_numpy(y).to(dev), reduction="none"
-            ).sum(1)
+                nats = nll(model, torch.from_numpy(x).to(dev), torch.from_numpy(y).to(dev))
             np.add.at(bits, [k for k, _, _ in batch], nats.cpu().numpy() / LN2)
         ticks = np.array([d["ticks"] for d in index])
         rec = {
@@ -505,17 +548,18 @@ class Experiment:  # pylint: disable=too-many-public-methods
         (rd / "eval.json").write_text(json.dumps(rec, indent=1), encoding="utf-8")
         log.info("%s: %.4f bits/tick", rd.name, rec["bits_per_tick"])
 
-    def generate(self, model, n: int, eos: int = EOS):
-        """``n`` sequences sampled after an ``eos`` for ``sample_tokens`` (an ended one's rest
-        ``eos``), half a context at a time after the last half a context."""
+    def generate(self, run: Run, model, prompts: np.ndarray) -> np.ndarray:  # pylint: disable=R0914
+        """Each prompt (a row of model ids) continued by sampling up to ``sample_tokens`` or an
+        EOS (the rest EOS), half a context at a time after the last half a context."""
         import torch  # pylint: disable=import-outside-toplevel,import-error
 
-        ctx, limit = self.cfg["ctx"], self.cfg["sample_tokens"]
-        seq = torch.full((n, 1), eos, dtype=torch.long, device=device()[0])
+        ctx, limit, eos = self.hp(run, "ctx"), self.cfg["sample_tokens"], self.eos(run)
+        seq = torch.from_numpy(np.asarray(prompts, np.int64)).to(device()[0])
+        n, p = seq.shape
         torch.manual_seed(self.cfg["seed"])
-        while seq.shape[1] <= limit and not bool((seq[:, 1:] == eos).any(1).all()):
+        while seq.shape[1] < p + limit and not bool((seq[:, p:] == eos).any(1).all()):
             tail = seq[:, -(ctx // 2) :]
-            new = min(ctx - tail.shape[1], limit + 1 - seq.shape[1])
+            new = min(ctx - tail.shape[1], p + limit - seq.shape[1])
             out = model.generate(
                 tail,
                 attention_mask=torch.ones_like(tail),
@@ -525,44 +569,78 @@ class Experiment:  # pylint: disable=too-many-public-methods
                 eos_token_id=eos,
                 pad_token_id=eos,
             )[:, tail.shape[1] :]
-            ended = (seq[:, 1:] == eos).any(1, keepdim=True)
+            ended = (seq[:, p:] == eos).any(1, keepdim=True)
             pad = torch.full((n, new - out.shape[1]), eos, dtype=torch.long, device=seq.device)
             seq = torch.cat([seq, torch.cat([out, pad], 1).masked_fill(ended, eos)], 1)
-        return seq[:, 1:].cpu().numpy()
+        return seq.cpu().numpy()
+
+    def prompts(self, run: Run) -> dict:
+        """``{kind: prompts}`` in the run's model's ids, each after an EOS: ``samples`` of the
+        header (as the test documents start), and the openings (``prompt_tokens``) of the
+        first ``samples`` test documents at least twice that long."""
+        n, p, lut = self.cfg["samples"], self.cfg["prompt_tokens"], self.lut(run)
+        data = np.load(self.data(run.tok) / f"{run.form}.test.npy", mmap_mode="r")
+        index = json.loads((self.data(run.tok) / f"{run.form}.test.json").read_text("utf-8"))
+        k = len(self.encoder(run.tok).encode([HEADER])[0]) + 1
+        opens = [data[d["start"] : d["start"] + p + 1] for d in index if d["tokens"] >= 2 * p]
+        out = {"header": np.tile(data[:k], (n, 1)), "continue": np.array(opens[:n], np.int64)}
+        return {kind: v if lut is None else lut[v] for kind, v in out.items() if len(v)}
 
     def sample(self, run: Run) -> None:  # pylint: disable=too-many-locals
-        """``samples/<i>.yaml`` sampled from the best model, and ``sample.json``: whether each
-        ended, parses, and plays ``play_ticks`` ticks on unitracker-player."""
+        """``samples/<kind>-<i>.yaml``, the best model's continuations of :meth:`prompts`, and
+        ``sample.json``: per kind, the share that end, parse and play ``play_ticks`` ticks, and
+        ``valid``, the mean share of generated characters before the first parse error."""
+        rd = self.rundir(run)
+        if (rd / "sample.json").exists():
+            return
+        vocab, enc = np.load(self.data(run.tok) / "vocab.npy"), self.encoder(run.tok)
+        eos, model, out = self.eos(run), self.trained(run), {}
+        (rd / "samples").mkdir(exist_ok=True)
+
+        def text(ids):
+            return enc.decode(ids if run.base else vocab[np.asarray(ids) - 1])
+
+        for kind, prompts in self.prompts(run).items():
+            recs, p = [], prompts.shape[1]
+            for i, ids in enumerate(self.generate(run, model, prompts)):
+                gen = ids[p:]
+                ended = bool((gen == eos).any())
+                gen = gen[: np.argmax(gen == eos)] if ended else gen
+                head, doc = text(ids[1:p]), text(np.concatenate([ids[1:p], gen]))
+                (rd / "samples" / f"{kind}-{i}.yaml").write_text(doc, encoding="utf-8")
+                rec = {"tokens": len(gen), "ended": ended} | self.check(doc, len(head))
+                recs.append(rec)
+            keys = ("ended", "parses", "plays", "valid")
+            out |= {f"{kind}_{k}": float(np.mean([r[k] for r in recs])) for k in keys}
+            out[kind] = recs
+        (rd / "sample.json").write_text(json.dumps(out, indent=1), "utf-8")
+        log.info("%s: %s", rd.name, {k: v for k, v in out.items() if k not in SAMPLES})
+
+    def check(self, doc: str, start: int) -> dict:
+        """Whether a sampled document parses and plays ``play_ticks`` ticks, its first error,
+        and ``valid``: the share of its characters from ``start`` before its first parse error
+        (all of them when it parses)."""
         # pylint: disable=import-outside-toplevel
         from pysidtracker.jobs import deadline
         from unitracker_grammar.document import read
         from unitracker_player.player import play
 
-        rd = self.rundir(run)
-        if (rd / "sample.json").exists():
-            return
-        vocab, enc = np.load(self.data(run.tok) / "vocab.npy"), self.encoder(run.tok)
-        eos = self.eos(run)
-        (rd / "samples").mkdir(exist_ok=True)
-        recs = []
-        for i, ids in enumerate(self.generate(self.trained(run), self.cfg["samples"], eos)):
-            ended = bool((ids == eos).any())
-            ids = ids[: np.argmax(ids == eos)] if ended else ids
-            text = enc.decode(ids if run.base else vocab[ids - 1])
-            (rd / "samples" / f"{i}.yaml").write_text(text, encoding="utf-8")
-            rec = {"tokens": len(ids), "ended": ended, "parses": False, "plays": False}
-            try:
-                read(text)
-                rec["parses"] = True
-                with deadline(60):
-                    play(text, ticks=self.cfg["play_ticks"])
-                rec["plays"] = True
-            except Exception as exc:  # pylint: disable=broad-exception-caught
-                rec["error"] = f"{type(exc).__name__}: {(str(exc).splitlines() or [''])[0]}"
-            recs.append(rec)
-        rec = {k: float(np.mean([r[k] for r in recs])) for k in ("ended", "parses", "plays")}
-        (rd / "sample.json").write_text(json.dumps(rec | {"samples": recs}, indent=1), "utf-8")
-        log.info("%s: %s", rd.name, rec)
+        rec = {"parses": False, "plays": False, "valid": 1.0}
+        try:
+            read(doc)
+            rec["parses"] = True
+            with deadline(60):
+                play(doc, ticks=self.cfg["play_ticks"])
+            rec["plays"] = True
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            msg = (str(exc).splitlines() or [""])[0]
+            rec["error"] = f"{type(exc).__name__}: {msg}"
+            at = re.match(r"line (\d+) column (\d+)", msg) if not rec["parses"] else None
+            if at:
+                line, col = int(at[1]), int(at[2])
+                pos = sum(len(ln) + 1 for ln in doc.split("\n")[: line - 1]) + col - 1
+                rec["valid"] = min(1.0, max(0.0, (pos - start) / max(1, len(doc) - start)))
+        return rec
 
     def finetune(self) -> None:
         """``finetune.json``, the ``ft_forms`` forms whose from-scratch runs score the fewest bits
@@ -609,11 +687,13 @@ class Experiment:  # pylint: disable=too-many-public-methods
             ("bits_per_tick", "bits/tick", "{:.4f}"),
             ("bits_per_tick_median", "median", "{:.4f}"),
             ("bits_per_char", "bits/char", "{:.4f}"),
-            ("ended", "ended", "{:.0%}"),
-            ("parses", "parses", "{:.0%}"),
-            ("plays", "plays", "{:.0%}"),
+            ("header_valid", "header valid", "{:.0%}"),
+            ("header_parses", "header parses", "{:.0%}"),
+            ("continue_valid", "continued valid", "{:.0%}"),
+            ("continue_parses", "continued parses", "{:.0%}"),
+            ("continue_plays", "continued plays", "{:.0%}"),
         ]
-        lines = ["| " + " | ".join(c[1] for c in cols) + " |", "|---|---|---|" + "---:|" * 9]
+        lines = ["| " + " | ".join(c[1] for c in cols) + " |", "|---|---|---|" + "---:|" * 11]
         for r in rows:
             lines.append("| " + " | ".join(f.format(r[k]) if k in r else "" for k, _, f in cols))
             lines[-1] += " |"
@@ -651,10 +731,10 @@ def status(out: Path, tail: int = 5) -> str:
     return "\n".join(lines)
 
 
-def launch(argv: list, out: Path, hvsc: Path | None) -> list:
+def launch(argv: list, out: Path, hvsc: Path | None, tunes: Path | None = None) -> list:
     """The commands that build the image and run ``learn.py run argv`` detached in it on the
     host's GPUs as this user, named for ``out``, appending to ``out/learn.log`` (``out``'s
-    parent, the corpus's, mounted)."""
+    parent, the corpus's, and the tune list's directory mounted)."""
     root, name = str(shared.ROOT), f"{IMAGE}-{out.name}"
     build = ["docker", "build", "-q", "-t", IMAGE, "-f", f"{root}/docker/learn/Dockerfile", root]
     env = ["HOME=/tmp", f"HF_HOME={root}/.cache/hf", "PYTHONPATH=src:tools", "PYTHONUNBUFFERED=1"]
@@ -664,7 +744,7 @@ def launch(argv: list, out: Path, hvsc: Path | None) -> list:
     run = ["docker", "run", "-d", "--name", name, "--device", "nvidia.com/gpu=all", "--ipc=host"]
     run += ["--user", f"{os.getuid()}:{os.getgid()}", "-w", root]
     run += [x for e in env for x in ("-e", e)]
-    mounts = [root, str(out.parent)] + ([str(hvsc)] if hvsc else [])
+    mounts = [root, str(out.parent)] + [str(p) for p in (hvsc, tunes and tunes.parent) if p]
     run += [x for m in mounts for x in ("-v", f"{m}:{m}")]
     run += [IMAGE, "sh", "-c", f"{cmd} >> {shlex.quote(str(out / 'learn.log'))} 2>&1"]
     return [build, ["docker", "rm", "-f", name], run]
@@ -703,7 +783,7 @@ def main(argv=None) -> int:
     if args.command == "launch":
         out.mkdir(parents=True, exist_ok=True)
         inner = [a for a in argv if a != "launch"] + ["--out", str(out)]
-        for cmd in launch(inner, out, args.hvsc):
+        for cmd in launch(inner, out, args.hvsc, args.tunes and args.tunes.resolve()):
             subprocess.run(cmd, check=cmd[1] != "rm", capture_output=cmd[1] == "rm")
         print(f"python tools/learn.py status --out {out}")
         return 0

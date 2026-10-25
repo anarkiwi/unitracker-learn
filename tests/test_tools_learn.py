@@ -68,6 +68,7 @@ def _experiment(tmp_path, base):
     cfg |= {"steps": 4, "warmup": 1, "eval_every": 2, "val_windows": 2, "batch_eval": 3}
     cfg |= {"samples": 2, "sample_tokens": 40, "play_ticks": 50, "held": [0.15, 0.15]}
     cfg |= {"ft_model": base, "ft_tokenizer": "cl100k_base", "ft_batch_eval": 2}
+    cfg |= {"ft_ctx": 64, "ft_batch": 2, "ft_micro": 1, "prompt_tokens": 8, "doc_starts": 0.5}
     exp = learn.Experiment(cfg, tmp_path / "out" / "x", tunes=tmp_path / "list.csv")
     for i, row in enumerate(rows[:-1]):
         doc = learn.shared.name(row)
@@ -109,7 +110,7 @@ def test_presets_take_json_or_string_overrides_of_their_keys():
 
 def test_windows_score_every_position_once_with_up_to_a_context_of_history(exp):
     for n in (2, 31, 32, 33, 100):
-        chunks = exp.chunks(n)
+        chunks = exp.chunks(n, 32)
         scored = [p for b, e, f in chunks for p in range(f, e)]
         assert scored == list(range(1, n))
         assert all(e - b <= exp.cfg["ctx"] and b < f for b, e, f in chunks)
@@ -143,10 +144,11 @@ def test_an_experiment_runs_end_to_end_and_resumes(exp, caplog):  # pylint: disa
     assert forms == [best["form"]] and rows[-1]["form"] == best["form"]
     ft = exp.rundir(learn.Run(best["form"], "cl100k_base", exp.cfg["ft_model"]))
     assert (ft / "best.pt").exists() and not (ft / "last.pt").exists()
-    assert len(list((ft / "samples").glob("*.yaml"))) == 2
+    assert len(list((ft / "samples").glob("*.yaml"))) == 4
     for r in rows:
         assert r["params"] > 0 and r["bits_per_tick"] > 0 and r["bits_per_token"] > 0
-        assert 0 <= r["parses"] <= 1 and r["seen_tokens"] == 4 * 4 * 32
+        assert 0 <= r["header_valid"] <= 1 and 0 <= r["continue_parses"] <= 1
+        assert r["seen_tokens"] == (2 * 64 if r["model"] != "scratch" else 4 * 32) * 4
     logged = [
         json.loads(ln) for ln in (exp.rundir(learn.Run("lifted", "bpe", "")) / "log.jsonl").open()
     ]
@@ -175,21 +177,54 @@ def test_training_resumes_from_its_last_checkpoint(exp, caplog):
     assert rec["seen_tokens"] == 4 * 4 * 32 and rec["best_val"] > 0
 
 
-def test_samples_that_are_documents_parse_and_play(exp, monkeypatch):
+def test_samples_continue_their_prompts_and_documents_parse_and_play(exp, monkeypatch):
     exp.cfg["tokenizers"] = ["bpe"]
     exp.cfg["forms"] = ["lifted"]
     exp.run()
-    text = _doc(3)
+    run, text = learn.Run("lifted", "bpe", ""), _doc(3)
     play(text, ticks=50)
-    vocab = np.load(exp.data("bpe") / "vocab.npy")
-    ids = np.searchsorted(vocab, exp.encoder("bpe").encode([text])[0]) + 1
-    monkeypatch.setattr(exp, "generate", lambda m, n, eos: np.stack([np.append(ids, [0, 5])] * n))
-    rd = exp.rundir(learn.Run("lifted", "bpe", ""))
+    prompts = exp.prompts(run)
+    assert prompts["header"].shape == (2, prompts["header"].shape[1])
+    assert prompts["continue"].shape[1] == 9 and (prompts["continue"][:, 0] == learn.EOS).all()
+    vocab, enc = np.load(exp.data("bpe") / "vocab.npy"), exp.encoder("bpe")
+    assert enc.decode(vocab[prompts["header"][0, 1:] - 1]) == learn.HEADER
+    ids = np.searchsorted(vocab, enc.encode([text])[0]) + 1
+
+    def generate(_, __, prompts):
+        rest = [learn.EOS, 5] if prompts.shape[1] == 9 else ids[prompts.shape[1] - 1 :]
+        return np.stack([np.concatenate([p, rest, [learn.EOS, 5]]) for p in prompts])
+
+    monkeypatch.setattr(exp, "generate", generate)
+    rd = exp.rundir(run)
     (rd / "sample.json").unlink()
-    exp.sample(learn.Run("lifted", "bpe", ""))
+    exp.sample(run)
     rec = json.loads((rd / "sample.json").read_text())
-    assert rec["ended"] == rec["parses"] == rec["plays"] == 1.0
-    assert (rd / "samples" / "0.yaml").read_text() == text
+    assert rec["header_ended"] == rec["header_parses"] == rec["header_plays"] == 1.0
+    assert rec["header_valid"] == 1.0 and (rd / "samples" / "header-0.yaml").read_text() == text
+    assert len(rec["continue"]) == 2 and (rd / "samples" / "continue-1.yaml").exists()
+
+
+def test_validity_is_the_share_generated_before_the_first_parse_error(exp):
+    text = _doc(1)
+    cut = text.index("song:")
+    broken = text[:cut] + "]]" + text[cut:]
+    rec = exp.check(broken, 10)
+    assert not rec["parses"] and rec["valid"] == pytest.approx((cut - 10) / (len(broken) - 10))
+    assert exp.check(text, 10)["valid"] == 1.0
+    rec = exp.check(text.replace("voices:1", "voices:2"), 0)
+    assert rec["parses"] != rec["plays"] or rec["valid"] < 1
+
+
+def test_a_share_of_training_windows_start_at_documents(exp):
+    data = np.arange(1, 1001, dtype=np.uint32)
+    data[[0, 500]] = learn.EOS
+    run = learn.Run("lifted", "bpe", "")
+    x, y = exp.windows(run, data, np.random.default_rng(0), 8, np.array([0, 500]))
+    assert (x[:4, 0] == learn.EOS).all() and x.shape == y.shape == (8, 32)
+    assert (y[:, :-1] == x[:, 1:]).all() and (y[:, -1] == -100).all()
+    x, y = exp.windows(run, data[:20], np.random.default_rng(0), 2)
+    assert (x[:, 20:] == learn.EOS).all() and (y[:, :19] == x[:, 1:20]).all()
+    assert (y[:, 19:] == -100).all()
 
 
 def test_status_reports_stages_corpus_runs_and_the_log(exp):
@@ -213,7 +248,9 @@ def test_the_tune_list_is_filtered_and_sampled(exp):
 
 
 def test_launch_builds_then_runs_detached_on_the_gpus(tmp_path):
-    build, rm, run = learn.launch(["--preset", "full"], tmp_path / "x", tmp_path / "h")
+    tunes = tmp_path / "t" / "list.csv"
+    build, rm, run = learn.launch(["--preset", "full"], tmp_path / "x", tmp_path / "h", tunes)
+    assert f"{tunes.parent}:{tunes.parent}" in run
     assert build[:2] == ["docker", "build"] and rm == ["docker", "rm", "-f", "unitracker-learn-x"]
     assert run[:3] == ["docker", "run", "-d"] and "nvidia.com/gpu=all" in run
     assert f"{tmp_path}:{tmp_path}" in run and f"{tmp_path / 'h'}:{tmp_path / 'h'}" in run
@@ -231,3 +268,20 @@ def test_the_command_line_runs_and_reports_status(exp, monkeypatch, capsys):
     monkeypatch.setattr(learn.Experiment, "run", lambda self, redo: calls.append(redo))
     assert learn.main(["run", "--out", out, "--redo", "eval"]) == 0
     assert calls[-1] == ["eval"]
+
+
+def test_the_chunked_loss_is_the_models_own_and_its_gradient(base):
+    import torch  # pylint: disable=import-outside-toplevel
+    from transformers import AutoModelForCausalLM  # pylint: disable=import-outside-toplevel
+
+    model = AutoModelForCausalLM.from_pretrained(base)
+    x = torch.randint(0, 100000, (3, 40))
+    want = model(input_ids=x, labels=x).loss
+    want.backward()
+    grad = model.get_output_embeddings().weight.grad.clone()
+    model.zero_grad()
+    y = torch.nn.functional.pad(x[:, 1:], (0, 1), value=-100)
+    got = learn.nll(model, x, y, chunk=7).sum() / (3 * 39)
+    got.backward()
+    assert got.item() == pytest.approx(want.item(), rel=1e-5)
+    assert torch.allclose(model.get_output_embeddings().weight.grad, grad, atol=1e-6)
