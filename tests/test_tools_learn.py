@@ -331,3 +331,28 @@ def test_the_chunked_loss_is_the_models_own_and_its_gradient(base):
     got.backward()
     assert got.item() == pytest.approx(want.item(), rel=1e-5)
     assert torch.allclose(model.get_output_embeddings().weight.grad, grad, atol=1e-6)
+
+
+def test_training_stops_after_patience_evaluations_without_a_better(exp, monkeypatch):
+    exp.cfg |= {"tokenizers": ["bpe"], "steps": 20, "eval_every": 1, "patience": 2}
+    for name, fn in exp.stages()[:5]:
+        if name != "corpus":
+            fn()
+    vals = iter([3.0, 2.0, 2.5, 2.1, 1.0])
+    monkeypatch.setattr(exp, "loss", lambda *_: next(vals))
+    run = learn.Run("lifted", "bpe", "")
+    exp.train(run)
+    rec = json.loads((exp.rundir(run) / "train.json").read_text())
+    assert rec["steps_run"] == 4 and rec["best_val"] == 2.0 and rec["seen_tokens"] == 4 * 4 * 32
+
+
+def test_a_lora_fine_tune_trains_and_keeps_only_its_adapters(exp):
+    exp.cfg |= {"tokenizers": ["bpe", "cl100k_base"], "ft_forms": ["lifted"], "ft_steps": 2}
+    exp.cfg["ft_lora"] = {"r": 4, "lora_alpha": 8, "lora_dropout": 0.0}
+    exp.run()
+    run = learn.Run("lifted", "cl100k_base", exp.cfg["ft_model"])
+    best = __import__("torch").load(exp.rundir(run) / "best.pt")
+    assert best and all("lora_" in k for k in best)
+    rec = json.loads((exp.rundir(run) / "train.json").read_text())
+    assert 0 < rec["trained"] < rec["params"]
+    assert json.loads((exp.rundir(run) / "eval.json").read_text())["bits_per_tick"] > 0

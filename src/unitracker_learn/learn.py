@@ -50,6 +50,8 @@ COMMON = {
     "batch_eval": 16,
     "play_ticks": 3000,
     "ft_model": "Qwen/Qwen2.5-0.5B",
+    "ft_lora": None,
+    "patience": 0,
     "ft_tokenizer": "qwen2.5",
     "ft_forms": 2,
     "ft_lr": 5e-5,
@@ -91,23 +93,28 @@ PRESETS = {
     "full": COMMON
     | {
         "tunes": 0,
-        "forms": ["lossy-single", "lossy-all"],
+        "forms": ["lossy", "lossy-single", "lossy-all", "lossy-nophrases-all"],
         "tokenizers": ["bpe", "qwen2.5"],
         "vocab": 8192,
         "timeout": 900,
         "hidden": 512,
         "layers": 8,
         "heads": 8,
-        "ctx": 2048,
-        "batch": 32,
-        "micro": 8,
+        "ctx": 4096,
+        "batch": 16,
+        "micro": 4,
         "steps": 5000,
         "warmup": 200,
         "eval_every": 250,
         "val_windows": 256,
         "samples": 16,
         "sample_tokens": 16384,
-        "ft_forms": ["lossy-single", "lossy-all"],
+        "ft_forms": ["lossy-all"],
+        "ft_model": "Qwen/Qwen2.5-1.5B",
+        "ft_lora": {"r": 64, "lora_alpha": 128, "lora_dropout": 0.05},
+        "lr": 1e-3,
+        "ft_lr": 2e-4,
+        "patience": 4,
         "prompt_tokens": 512,
         "ft_ctx": 8192,
         "ft_batch": 8,
@@ -154,6 +161,14 @@ def eos_id(base: str) -> int:
 
     eos = AutoConfig.from_pretrained(base).eos_token_id
     return eos[0] if isinstance(eos, list) else eos
+
+
+def trained_state(model) -> dict:
+    """A model's trained weights (all of a model trained whole, a LoRA model's adapters)."""
+    names = {n for n, p in model.named_parameters() if p.requires_grad}
+    if len(names) == len(list(model.parameters())):
+        return model.state_dict()
+    return {k: v for k, v in model.state_dict().items() if k in names}
 
 
 def where(doc: str, pos: int) -> str:
@@ -383,10 +398,10 @@ class Experiment:  # pylint: disable=too-many-public-methods
         """A run's model: the pretrained one, or an untrained Llama decoder of the configured
         shape over its tokenizer's model ids."""
         # pylint: disable=import-outside-toplevel,import-error
-        from transformers import AutoModelForCausalLM, LlamaConfig, LlamaForCausalLM
+        from transformers import LlamaConfig, LlamaForCausalLM
 
         if run.base:
-            return AutoModelForCausalLM.from_pretrained(run.base)
+            return self.pretrained(run.base)
         c = self.cfg
         shape = LlamaConfig(  # pylint: disable=unexpected-keyword-arg
             vocab_size=len(np.load(self.data(run.tok) / "vocab.npy")) + 1,
@@ -401,6 +416,23 @@ class Experiment:  # pylint: disable=too-many-public-methods
             pad_token_id=EOS,
         )
         return LlamaForCausalLM(shape)
+
+    def pretrained(self, base: str):
+        """A pretrained model, with ``ft_lora`` (peft LoRA settings) its adapters on every
+        linear layer over its frozen bf16 weights, else all its weights trained."""
+        # pylint: disable=import-outside-toplevel,import-error
+        import torch
+        from transformers import AutoModelForCausalLM
+
+        lora = self.cfg["ft_lora"]
+        dtype = torch.bfloat16 if lora else torch.float32
+        model = AutoModelForCausalLM.from_pretrained(base, dtype=dtype)
+        if not lora:
+            return model
+        from peft import LoraConfig, get_peft_model
+
+        shape = LoraConfig(target_modules="all-linear", task_type="CAUSAL_LM", **lora)
+        return get_peft_model(model, shape)
 
     def windows(self, run: Run, data, rng, n: int, starts=None):  # pylint: disable=R0914
         """``(x, y)``: ``n`` windows of ``ctx`` tokens of ``data`` (EOS padded) in the run's model's
@@ -424,8 +456,9 @@ class Experiment:  # pylint: disable=too-many-public-methods
 
     def train(self, run: Run) -> None:  # pylint: disable=too-many-locals,too-many-statements
         """A run's model trained ``steps`` batches of random windows (``micro`` a pass; AdamW,
-        warmup, cosine decay), validated every ``eval_every`` steps on fixed windows: ``best.pt``
-        the best, ``last.pt`` to resume from, ``log.jsonl`` and ``train.json`` its record."""
+        warmup, cosine decay), validated every ``eval_every`` steps on fixed windows and stopped
+        after ``patience`` (if any) without a better: ``best.pt`` its trained weights at the best,
+        ``last.pt`` to resume from, ``log.jsonl`` and ``train.json`` its record."""
         import torch  # pylint: disable=import-outside-toplevel,import-error
 
         c, rd, steps = self.cfg, self.rundir(run), self.hp(run, "steps")
@@ -437,20 +470,20 @@ class Experiment:  # pylint: disable=too-many-public-methods
         torch.backends.cuda.matmul.allow_tf32 = True
         model = self.model(run).to(dev)
         if run.base:
-            model.gradient_checkpointing_enable()
-        opt = torch.optim.AdamW(
-            model.parameters(), lr=self.hp(run, "lr"), betas=(0.9, 0.95), weight_decay=0.1
-        )
+            model.gradient_checkpointing_enable({"use_reentrant": False})
+            model.enable_input_require_grads()
+        weights = [p for p in model.parameters() if p.requires_grad]
+        opt = torch.optim.AdamW(weights, lr=self.hp(run, "lr"), betas=(0.9, 0.95), weight_decay=0.1)
 
         def rate(s):
             decay = 0.5 * (1 + math.cos(math.pi * min(1.0, s / steps)))
             return min(1.0, (s + 1) / self.hp(run, "warmup")) * (0.1 + 0.9 * decay)
 
         sched = torch.optim.lr_scheduler.LambdaLR(opt, rate)
-        state = {"step": 0, "best": math.inf, "seconds": 0.0}
+        state = {"step": 0, "best": math.inf, "seconds": 0.0, "since": 0}
         if (rd / "last.pt").exists():
             ck = torch.load(rd / "last.pt", map_location=dev)
-            model.load_state_dict(ck["model"])
+            model.load_state_dict(ck["model"], strict=False)
             opt.load_state_dict(ck["opt"])
             sched.load_state_dict(ck["sched"])
             state = ck["state"]
@@ -461,7 +494,14 @@ class Experiment:  # pylint: disable=too-many-public-methods
         index = json.loads((self.data(run.tok) / f"{run.form}.train.json").read_text("utf-8"))
         starts, batch = np.array([d["start"] for d in index], np.int64), self.hp(run, "batch")
         params = sum(p.numel() for p in model.parameters())
-        log.info("%s: %d parameters, %d training tokens", rd.name, params, len(train))
+        trainable = sum(p.numel() for p in weights)
+        log.info(
+            "%s: %d parameters (%d trained), %d training tokens",
+            rd.name,
+            params,
+            trainable,
+            len(train),
+        )
         pbar = progress(
             range(state["step"], steps), initial=state["step"], total=steps, desc=rd.name
         )
@@ -480,7 +520,7 @@ class Experiment:  # pylint: disable=too-many-public-methods
                         part = nll(model, b, t).sum() / count
                     part.backward()
                     loss += part.detach()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                torch.nn.utils.clip_grad_norm_(weights, 1.0)
                 opt.step()
                 sched.step()
                 state["seconds"] += time.time() - start
@@ -493,13 +533,18 @@ class Experiment:  # pylint: disable=too-many-public-methods
                 fh.write(json.dumps(rec | {"seconds": state["seconds"]}) + "\n")
                 fh.flush()
                 log.info("%s step %d loss %.4f val %.4f", rd.name, *list(rec.values()))
+                state["since"] += 1
                 if rec["val"] < state["best"]:
-                    state["best"] = rec["val"]
-                    torch.save(model.state_dict(), rd / "best.pt")
-                ck = {"model": model.state_dict(), "opt": opt.state_dict()}
+                    state["best"], state["since"] = rec["val"], 0
+                    torch.save(trained_state(model), rd / "best.pt")
+                ck = {"model": trained_state(model), "opt": opt.state_dict()}
                 torch.save(ck | {"sched": sched.state_dict(), "state": state}, rd / "last.pt")
-        seen = steps * batch * self.hp(run, "ctx")
-        rec = {"params": params, "train_tokens": len(train), "seen_tokens": seen}
+                if 0 < self.hp(run, "patience") <= state["since"]:
+                    log.info("%s stopped at step %d", rd.name, state["step"])
+                    break
+        seen = state["step"] * batch * self.hp(run, "ctx")
+        rec = {"params": params, "trained": trainable, "train_tokens": len(train)}
+        rec |= {"steps_run": state["step"], "seen_tokens": seen}
         rec |= {"best_val": state["best"], "seconds": state["seconds"]}
         rec["tokens_per_second"] = seen / max(state["seconds"], 1e-9)
         (rd / "train.json").write_text(json.dumps(rec, indent=1), encoding="utf-8")
@@ -523,7 +568,8 @@ class Experiment:  # pylint: disable=too-many-public-methods
         import torch  # pylint: disable=import-outside-toplevel,import-error
 
         model = self.model(run)
-        model.load_state_dict(torch.load(self.rundir(run) / "best.pt", map_location="cpu"))
+        best = torch.load(self.rundir(run) / "best.pt", map_location="cpu")
+        model.load_state_dict(best, strict=not run.base)
         return model.to(device()[0]).eval()
 
     def chunks(self, n: int, ctx: int) -> list:

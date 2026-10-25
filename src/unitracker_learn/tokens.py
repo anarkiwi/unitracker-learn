@@ -222,7 +222,7 @@ def main(argv=None) -> int:
     os.environ.setdefault("HF_HOME", str(ROOT / ".cache" / "hf"))
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("root", type=Path, nargs="?", default=Path("out/tokenize"))
-    ap.add_argument("--forms", nargs="*", default=list(lift.forms()))
+    ap.add_argument("--forms", nargs="*", default=list(lift.forms(ablations=False)))
     ap.add_argument("--encoders", nargs="*", default=list(tk.REFERENCES))
     ap.add_argument("--jobs", type=int, default=max(1, len(os.sched_getaffinity(0)) - 2))
     args = ap.parse_args(argv)
