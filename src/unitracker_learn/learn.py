@@ -56,7 +56,7 @@ PRESETS = {
     "smoke": COMMON
     | {
         "tunes": 8,
-        "forms": ["lifted", "named"],
+        "forms": ["lossy-single", "lossy-all"],
         "tokenizers": ["bpe", "qwen2.5"],
         "vocab": 512,
         "timeout": 300,
@@ -84,7 +84,7 @@ PRESETS = {
     "full": COMMON
     | {
         "tunes": 0,
-        "forms": ["lifted", "named", "all", "lossy-all"],
+        "forms": ["lossy-single", "lossy-all"],
         "tokenizers": ["bpe", "qwen2.5"],
         "vocab": 8192,
         "timeout": 900,
@@ -100,6 +100,7 @@ PRESETS = {
         "val_windows": 256,
         "samples": 16,
         "sample_tokens": 16384,
+        "ft_forms": ["lossy-single", "lossy-all"],
         "prompt_tokens": 512,
         "ft_ctx": 8192,
         "ft_batch": 8,
@@ -643,8 +644,9 @@ class Experiment:  # pylint: disable=too-many-public-methods
         return rec
 
     def finetune(self) -> None:
-        """``finetune.json``, the ``ft_forms`` forms whose from-scratch runs score the fewest bits
-        per tick, then each one's fine-tune of ``ft_model`` trained, evaluated and sampled."""
+        """``finetune.json``, the ``ft_forms`` forms (a list, or that many whose from-scratch runs
+        score the fewest bits per tick), then each one's fine-tune of ``ft_model`` trained,
+        evaluated and sampled."""
         if self.cfg["ft_tokenizer"] not in self.cfg["tokenizers"]:
             log.info("no fine-tune: %s is not encoded", self.cfg["ft_tokenizer"])
             return
@@ -652,7 +654,9 @@ class Experiment:  # pylint: disable=too-many-public-methods
         for row in self.results():
             if "bits_per_tick" in row:
                 best[row["form"]] = min(best.get(row["form"], math.inf), row["bits_per_tick"])
-        forms = sorted(best, key=best.get)[: self.cfg["ft_forms"]]
+        forms = self.cfg["ft_forms"]
+        if isinstance(forms, int):
+            forms = sorted(best, key=best.get)[:forms]
         (self.out / "finetune.json").write_text(json.dumps(forms), encoding="utf-8")
         log.info("fine-tuning %s on %s", self.cfg["ft_model"], forms)
         for run in self.runs(scratch=False):

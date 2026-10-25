@@ -161,6 +161,13 @@ def test_an_experiment_runs_end_to_end_and_resumes(exp, caplog):  # pylint: disa
     assert "stage" not in caplog.text
 
 
+def test_fine_tunes_take_the_forms_named(exp):
+    exp.cfg |= {"tokenizers": ["bpe", "cl100k_base"], "ft_forms": ["lifted"], "ft_steps": 2}
+    exp.run()
+    assert json.loads((exp.out / "finetune.json").read_text()) == ["lifted"]
+    assert [r["form"] for r in exp.results() if r["model"] != "scratch"] == ["lifted"]
+
+
 def test_training_resumes_from_its_last_checkpoint(exp, caplog):
     exp.cfg["tokenizers"] = ["bpe"]
     for name, fn in exp.stages()[:5]:
