@@ -442,7 +442,7 @@ def main(argv=None) -> int:
     ap.add_argument("--batch", type=int, default=16, help="documents at once")
     ap.add_argument("--limit", type=int, default=4096, help="tokens per sample")
     ap.add_argument("--wander", type=int, default=30, help="random tokens before the bigrams")
-    args = ap.parse_args(argv)
+    args = ap.parse_intermixed_args(argv)
     con, texts = Constraint(args.tokenizer, args.eos), documents(args.docs, args.n, args.seed)
     if args.mode == "hazards":
         found = set(hazards(con, progress=True))
