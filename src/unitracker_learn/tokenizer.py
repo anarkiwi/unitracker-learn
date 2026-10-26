@@ -171,6 +171,15 @@ class Encoder:
             for e in self._hf.encode_batch(texts, add_special_tokens=False)
         ]
 
+    def byte_ids(self) -> np.ndarray:
+        """The ids of the tokens that are one byte each, every byte's."""
+        if self._tt is not None:
+            return np.array([self._tt.encode_single_token(bytes([b])) for b in range(256)])
+        from tokenizers import pre_tokenizers  # pylint: disable=import-outside-toplevel
+
+        ids = (self._hf.token_to_id(c) for c in pre_tokenizers.ByteLevel.alphabet())
+        return np.array(sorted(i for i in ids if i is not None))
+
     def decode(self, ids) -> str:
         """The text of token ``ids``."""
         if self._tt is not None:

@@ -14,6 +14,8 @@ from pathlib import Path
 
 import llguidance
 import numpy as np
+
+import lm
 from tqdm import tqdm
 from unitracker_grammar.canonical import GRAMMAR, parse, parser
 from unitracker_grammar.document import read
@@ -289,16 +291,40 @@ class Constraint:
         return out
 
 
+class Masked:  # pylint: disable=too-few-public-methods
+    """A ``model.generate`` logits processor that keeps each row to the document grammar: each
+    row's matcher fed its new tokens (``cols`` maps model ids to native ids, None the same; a
+    window's first call's last token is new unless ``fresh``) and its logits masked; a row whose
+    mask leaves no model id is ended, its index in ``stuck``."""
+
+    def __init__(self, constraint, matchers: list, cols, eos: int, fresh: bool):
+        self.constraint, self.matchers, self.cols, self.eos = constraint, matchers, cols, eos
+        self.pending, self.stuck = not fresh, set()
+
+    def __call__(self, input_ids, scores):
+        import torch  # pylint: disable=import-outside-toplevel,import-error
+
+        if self.pending:
+            for m, t in zip(self.matchers, input_ids[:, -1].tolist()):
+                m.feed([t if self.cols is None else int(self.cols[t])])
+        self.pending = True
+        mask = self.constraint.masks(self.matchers, tensor=True)
+        mask = mask[:, : scores.shape[1]] if self.cols is None else mask[:, self.cols]
+        mask = mask.to(scores.device)
+        empty = ~mask.any(1)
+        self.stuck.update(empty.nonzero().flatten().tolist())
+        mask[empty, self.eos] = True
+        return scores.masked_fill(~mask, -torch.inf)
+
+
 def documents(paths: list, n: int = 0, seed: int = 0) -> list:
     """The ``.yaml`` documents of ``paths`` (files, or directories searched), a seeded sample of
     ``n`` where ``n``, their meta lines replaced as the learnability experiment's models read
     them."""
-    import learn  # pylint: disable=import-outside-toplevel
-
     files = sorted(f for p in map(Path, paths) for f in (p.rglob("*.yaml") if p.is_dir() else [p]))
     if 0 < n < len(files):
         files = [files[i] for i in sorted(np.random.default_rng(seed).choice(len(files), n, False))]
-    return [learn.META_LINE.sub(learn.META, f.read_text("utf-8"), count=1) for f in files]
+    return [lm.META_LINE.sub(lm.META, f.read_text("utf-8"), count=1) for f in files]
 
 
 def _kinds(con: Constraint) -> tuple:

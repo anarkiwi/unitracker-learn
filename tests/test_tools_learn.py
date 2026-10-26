@@ -116,6 +116,19 @@ def test_windows_score_every_position_once_with_up_to_a_context_of_history(exp):
         assert all(e - b <= exp.cfg["ctx"] and b < f for b, e, f in chunks)
 
 
+def _constrained_samples_are_grammar_prefixes(exp):
+    for r in exp.runs() + exp.runs(scratch=False):
+        rec = json.loads((exp.rundir(r) / "sample.json").read_text())
+        for kind in ("header", "continue"):
+            constrained = rec.get(f"{kind}_constrained", [])
+            assert bool(constrained) == (r.tok == "bpe"), (r, kind)
+            assert all(s["valid"] == 1.0 for s in constrained if s["ended"]), (r, kind)
+            assert not any(s.get("stuck") for s in constrained), (r, kind)
+            assert all(s["prefix"] == 1.0 for s in constrained), (r, kind)
+            if r.tok == "bpe":
+                assert all(0 <= s["prefix"] <= 1 for s in rec[kind])
+
+
 def test_an_experiment_runs_end_to_end_and_resumes(exp, caplog):  # pylint: disable=R0914
     caplog.set_level("INFO")
     exp.run()
@@ -149,12 +162,14 @@ def test_an_experiment_runs_end_to_end_and_resumes(exp, caplog):  # pylint: disa
     for r in rows:
         assert r["params"] > 0 and r["bits_per_tick"] > 0 and r["bits_per_token"] > 0
         assert 0 <= r["header_valid"] <= 1 and 0 <= r["continue_parses"] <= 1
+        assert ("header_prefix" in r) == (r["tokenizer"] == "bpe")
         assert r["seen_tokens"] == (2 * 64 if r["model"] != "scratch" else 4 * 32) * 4
     logged = [
         json.loads(ln) for ln in (exp.rundir(learn.Run("lifted", "bpe", "")) / "log.jsonl").open()
     ]
     assert [r["step"] for r in logged] == [2, 4]
     table = (exp.out / "results.md").read_text()
+    _constrained_samples_are_grammar_prefixes(exp)
     assert "| lifted | bpe | scratch |" in table and "| lifted | " in table.split("zstd_dict")[1]
     base = json.loads((exp.out / "baselines.json").read_text())
     assert (
@@ -210,7 +225,7 @@ def test_samples_continue_their_prompts_and_documents_parse_and_play(exp, monkey
     assert enc.decode(vocab[prompts["header"][0, 1:] - 1]) == learn.HEADER
     ids = np.searchsorted(vocab, enc.encode([text])[0]) + 1
 
-    def generate(_, __, prompts):
+    def generate(_, __, prompts, stuck=None):  # pylint: disable=unused-argument
         rest = [learn.EOS, 5] if prompts.shape[1] == 9 else ids[prompts.shape[1] - 1 :]
         return np.stack([np.concatenate([p, rest, [learn.EOS, 5]]) for p in prompts])
 
@@ -356,3 +371,21 @@ def test_a_lora_fine_tune_trains_and_keeps_only_its_adapters(exp):
     rec = json.loads((exp.rundir(run) / "train.json").read_text())
     assert 0 < rec["trained"] < rec["params"]
     assert json.loads((exp.rundir(run) / "eval.json").read_text())["bits_per_tick"] > 0
+
+
+def test_a_row_the_grammar_leaves_no_model_id_is_ended_and_stuck():
+    import torch  # pylint: disable=import-outside-toplevel
+    import constrain  # pylint: disable=import-outside-toplevel
+
+    class Grammar:  # pylint: disable=too-few-public-methods
+        """Masks that leave the second row only a native id no model id maps to."""
+
+        def masks(self, _, tensor=False):  # pylint: disable=unused-argument
+            return torch.tensor([[True, False, False, False], [False, False, False, True]])
+
+    masked = constrain.Masked(Grammar(), [None, None], np.array([2, 1, 0]), 1, True)
+    out = masked(torch.zeros((2, 5), dtype=torch.long), torch.zeros((2, 3)))
+    assert masked.stuck == {1} and torch.isinf(out).tolist() == [
+        [True, True, False],
+        [True, False, True],
+    ]

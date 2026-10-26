@@ -5,6 +5,7 @@ import re
 
 import numpy as np
 import pytest
+from tokenizers import pre_tokenizers
 
 import optimiser_docs as D
 
@@ -187,3 +188,21 @@ def test_a_reference_hf_tokenizer_is_fetched_by_repository(tmp_path, monkeypatch
     enc = tk.encoder("fake")
     assert asked == [("org/fake", "tokenizer.json")] and enc.count(DOC) > 0
     tk.encoder.cache_clear()
+
+
+@pytest.mark.parametrize("name", ["cl100k_base", "bpe"])
+def test_each_byte_has_a_token_of_its_own(name, tmp_path):
+    if name == "bpe":
+        _corpus(tmp_path / "c")
+        tk.train(sorted((tmp_path / "c").rglob("*.yaml")), 300, tmp_path / "bpe", progress=False)
+        name = str(tmp_path / "bpe")
+    enc = tk.encoder(name)
+    ids = enc.byte_ids().tolist()
+    assert len(ids) == len(set(ids)) == 256
+    # pylint: disable=protected-access
+    if enc._tt is not None:
+        assert {enc._tt.decode_single_token_bytes(i) for i in ids} == {
+            bytes([b]) for b in range(256)
+        }
+    else:
+        assert {enc._hf.id_to_token(i) for i in ids} == set(pre_tokenizers.ByteLevel.alphabet())
