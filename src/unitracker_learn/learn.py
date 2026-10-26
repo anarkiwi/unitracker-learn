@@ -57,6 +57,8 @@ COMMON = {
     "meta": False,
     "probe_docs": 96,
     "constrain": True,
+    "subtunes": True,
+    "min_seconds": 0,
 }
 PRESETS = {
     "smoke": COMMON
@@ -90,6 +92,7 @@ PRESETS = {
     "full": COMMON
     | {
         "tunes": 0,
+        "min_seconds": 10,
         "forms": ["lossy", "lossy-single", "lossy-all", "lossy-nophrases-all"],
         "tokenizers": ["bpe", "qwen2.5"],
         "vocab": 8192,
@@ -129,19 +132,16 @@ def composer(path: str) -> str:
     return "/".join(parts[:3:2]) if parts[0] == "MUSICIANS" and len(parts) > 3 else path
 
 
-def split(groups: dict, held: list) -> dict:
-    """``{group: split}`` of ``{group: documents}``: groups in SHA-1 order fill ``test`` then
-    ``val`` (each at least one group and its fraction of ``held``, ``[val, test]``, of the
-    documents), the rest ``train``."""
-    order = sorted(groups, key=lambda g: hashlib.sha1(g.encode()).hexdigest())
-    total, out, filled = sum(groups.values()), {}, 0
-    quotas = iter([("test", held[1]), ("val", held[0])])
-    name, quota = next(quotas)
-    for g in order:
-        if name != "train" and filled and filled >= quota * total:
-            (name, quota), filled = next(quotas, ("train", 0.0)), 0
-        out[g] = name
-        filled += groups[g]
+def split(groups, held: list) -> dict:
+    """``{group: split}``: a group's SHA-1 as a fraction u of 1 is ``test`` under ``held[1]``,
+    ``val`` under ``held[0] + held[1]`` (``held`` ``[val, test]``), else ``train``, whatever the
+    other groups; a held split no group falls in takes the training group of least u."""
+    u = {g: int(hashlib.sha1(g.encode()).hexdigest(), 16) / 16**40 for g in groups}
+    out = {g: "test" if v < held[1] else "val" if v < sum(held) else "train" for g, v in u.items()}
+    for name in ("test", "val"):
+        train = [g for g in u if out[g] == "train"]
+        if train and name not in out.values():
+            out[min(train, key=u.get)] = name
     return out
 
 
@@ -244,9 +244,20 @@ class Experiment:  # pylint: disable=too-many-public-methods
             writer.writerows(rows)
         log.info("%d tunes", len(rows))
 
+    def selection(self) -> tuple:
+        """``(subtune, min_seconds)``: every subtune with ``subtunes``, else the first, and the
+        shortest song kept."""
+        return "all" if self.cfg.get("subtunes") else 0, self.cfg.get("min_seconds", 0)
+
+    def songs(self) -> list:
+        """``tunes.csv``'s songs (:func:`shared.songs` of :meth:`selection`)."""
+        return shared.songs(shared.rows([self.out / "tunes.csv"]), *self.selection())
+
     def forms(self) -> None:
-        """Each tune's forms, cached in the corpus the experiments share."""
+        """Each song's forms, cached in the corpus the experiments share."""
+        subtune, seconds = self.selection()
         args = ["forms", str(self.out / "tunes.csv"), "--out", str(self.corpus)]
+        args += ["--subtune", str(subtune), "--min-seconds", str(seconds)]
         args += ["--forms", *self.cfg["forms"], "--timeout", str(self.cfg["timeout"])]
         args += ["--jobs", str(self.cfg["jobs"])]
         corpus.main(args + (["--hvsc", str(self.hvsc)] if self.hvsc else []))
@@ -255,27 +266,32 @@ class Experiment:  # pylint: disable=too-many-public-methods
         """A document's form in the corpus."""
         return self.corpus / form / f"{doc}.yaml"
 
+    def meta(self, doc: str) -> dict:
+        """A document's corpus record (:func:`corpus.forms_one`), empty if it has none."""
+        path = self.corpus / "meta" / f"{doc}.json"
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
     def split(self) -> None:
-        """``split.json``: each tune every form has, its split (by composer) and song ticks."""
-        with (self.out / "tunes.csv").open(newline="", encoding="utf-8") as fh:
-            rows = list(csv.DictReader(fh))
-        docs, ticks = {}, {}
-        for row in rows:
+        """``split.json``: each song every form has, its split (by composer) and song ticks, of
+        songs whose first form is the same but for its meta line only the first by name."""
+        songs, out, found = sorted(self.songs(), key=shared.name), {}, 0
+        for row in songs:
             doc = shared.name(row)
-            meta = self.corpus / "meta" / f"{doc}.json"
-            if not meta.exists() or not all(self.path(f, doc).exists() for f in self.cfg["forms"]):
+            ticks = self.meta(doc).get("ticks", 0)
+            if not ticks or not all(self.path(f, doc).exists() for f in self.cfg["forms"]):
                 continue
-            ticks[doc] = json.loads(meta.read_text(encoding="utf-8")).get("ticks", 0)
-            if ticks[doc]:
-                docs[doc] = composer(row["path"])
-        sizes = {}
-        for g in docs.values():
-            sizes[g] = sizes.get(g, 0) + 1
-        of = split(sizes, self.cfg["held"])
-        out = {d: {"split": of[g], "group": g, "ticks": ticks[d]} for d, g in sorted(docs.items())}
+            text = META_LINE.sub("", self.path(self.cfg["forms"][0], doc).read_text("utf-8"), 1)
+            key = hashlib.sha1(text.encode()).digest()
+            out.setdefault(key, (doc, {"group": composer(row["path"]), "ticks": ticks}))
+            found += 1
+        of = split({v["group"] for _, v in out.values()}, self.cfg["held"])
+        dups = found - len(out)
+        out = {d: {"split": of[v["group"]]} | v for d, v in sorted(out.values())}
         (self.out / "split.json").write_text(json.dumps(out, indent=1), encoding="utf-8")
         counts = {s: sum(v["split"] == s for v in out.values()) for s in SPLITS}
-        log.info("%d of %d tunes in every form: %s", len(out), len(rows), counts)
+        log.info(
+            "%d of %d songs in every form, %d duplicates: %s", len(out), len(songs), dups, counts
+        )
 
     def docs(self, which: str | None = None) -> dict:
         """``split.json``'s documents, those of split ``which`` if given."""
@@ -753,8 +769,18 @@ class Experiment:  # pylint: disable=too-many-public-methods
 
         probe.analyse(self)
 
+    def verified(self, per_doc: dict) -> dict:
+        """Bits per song tick over the test documents of ``per_doc`` (``{doc: bits}``) that play
+        their native player's grid, and their count."""
+        docs = self.docs("test")
+        ok = [d for d in per_doc if self.meta(d).get("verified")]
+        ticks = sum(docs[d]["ticks"] for d in ok)
+        bits = {"bits_per_tick_verified": sum(per_doc[d] for d in ok) / ticks} if ok else {}
+        return {"verified_docs": len(ok)} | bits
+
     def results(self) -> list:
-        """Each run's row: its form, tokenizer, base model and its stages' records' scalars."""
+        """Each run's row: its form, tokenizer, base model, its stages' records' scalars and
+        its bits per tick over the verified test documents."""
         rows = []
         for run in self.runs() + self.runs(scratch=False):
             row, rd = {"form": run.form, "tokenizer": run.tok}, self.rundir(run)
@@ -763,6 +789,7 @@ class Experiment:  # pylint: disable=too-many-public-methods
                 if (rd / f"{name}.json").exists():
                     rec = json.loads((rd / f"{name}.json").read_text(encoding="utf-8"))
                     row |= {k: v for k, v in rec.items() if not isinstance(v, (dict, list))}
+                    row |= self.verified(rec["per_doc"]) if "per_doc" in rec else {}
             rows.append(row)
         return rows
 
@@ -779,6 +806,8 @@ class Experiment:  # pylint: disable=too-many-public-methods
             ("best_val", "val loss", "{:.4f}"),
             ("bits_per_tick", "bits/tick", "{:.4f}"),
             ("bits_per_tick_median", "median", "{:.4f}"),
+            ("bits_per_tick_verified", "verified bits/tick", "{:.4f}"),
+            ("verified_docs", "verified docs", "{}"),
             ("bits_per_char", "bits/char", "{:.4f}"),
             ("header_prefix", "header prefix", "{:.0%}"),
             ("header_parses", "header parses", "{:.0%}"),
@@ -790,7 +819,10 @@ class Experiment:  # pylint: disable=too-many-public-methods
             ("continue_constrained_parses", "constrained continued parses", "{:.0%}"),
             ("continue_constrained_plays", "constrained continued plays", "{:.0%}"),
         ]
-        lines = ["| " + " | ".join(c[1] for c in cols) + " |", "|---|---|---|" + "---:|" * 15]
+        lines = [
+            "| " + " | ".join(c[1] for c in cols) + " |",
+            "|---|---|---|" + "---:|" * (len(cols) - 3),
+        ]
         for r in rows:
             lines.append("| " + " | ".join(f.format(r[k]) if k in r else "" for k, _, f in cols))
             lines[-1] += " |"
@@ -821,8 +853,7 @@ def status(out: Path, tail: int = 5) -> str:
             f"  {name:10} " + (f"done {mark.read_text().strip()}s" if mark.exists() else "-")
         )
     if (out / "tunes.csv").exists():
-        with (out / "tunes.csv").open(newline="", encoding="utf-8") as fh:
-            names = [shared.name(r) for r in csv.DictReader(fh)]
+        names = [shared.name(r) for r in exp.songs()]
         for form in exp.cfg["forms"]:
             have = sum(exp.path(form, d).exists() for d in names)
             err = sum(exp.path(form, d).with_suffix(".err").exists() for d in names)
