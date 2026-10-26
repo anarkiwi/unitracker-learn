@@ -2,7 +2,9 @@
 CPU, its status, and the container's launch commands."""
 
 import csv
+import hashlib
 import json
+from collections import Counter
 
 import learn
 import numpy as np
@@ -25,7 +27,7 @@ def _doc(i: int) -> str:
         "        c1:[{wait:0,ctrl:65,note:+0},{hold:1,ctrl:64},end]\n"
         "      phrase:\n"
         f"        p1:[C4.i1,{notes}]\n",
-        head="voices:1\ntempo:6\n",
+        head=f"voices:1\ntempo:{4 + i}\n",
         mods="",
     )
 
@@ -76,7 +78,9 @@ def _experiment(tmp_path, base):
             exp.path(form, doc).parent.mkdir(parents=True, exist_ok=True)
             exp.path(form, doc).write_text(_doc(i + (form == "named")), encoding="utf-8")
         (exp.corpus / "meta").mkdir(exist_ok=True)
-        (exp.corpus / "meta" / f"{doc}.json").write_text(json.dumps({"ticks": 100 + i}))
+        (exp.corpus / "meta" / f"{doc}.json").write_text(
+            json.dumps({"ticks": 100 + i, "verified": i % 3 > 0})
+        )
     exp.path("named", learn.shared.name(rows[0])).unlink()
     (exp.out / "stages").mkdir(parents=True)
     (exp.out / "stages" / "corpus").write_text("0\n")
@@ -89,18 +93,53 @@ def test_a_tunes_composer_is_its_musician_directory_else_the_tune():
     assert learn.composer("GAMES/A-F/x.sid") == "GAMES/A-F/x.sid"
 
 
-@pytest.mark.parametrize("sizes", [{"a": 1, "b": 1, "c": 1}, {f"g{i}": i + 1 for i in range(40)}])
-def test_groups_fill_test_then_val_to_their_fractions_the_rest_train(sizes):
-    got = learn.split(sizes, [0.1, 0.2])
-    assert got == learn.split(dict(reversed(sizes.items())), [0.1, 0.2])
-    docs = {s: sum(n for g, n in sizes.items() if got[g] == s) for s in learn.SPLITS}
-    total = sum(sizes.values())
-    assert docs["test"] >= 0.2 * total and docs["val"] >= 0.1 * total and docs["train"]
-    if len(sizes) > 3:
-        assert docs["train"] > 0.6 * total
+def test_a_groups_split_is_its_hash_against_the_held_fractions_whatever_the_others():
+    groups = [f"g{i}" for i in range(4000)]
+    got = learn.split(groups, [0.1, 0.2])
+    assert got == {
+        g: s for g, s in learn.split(groups[::-1] + ["new"], [0.1, 0.2]).items() if g != "new"
+    }
+    share = Counter(got.values())
+    assert {s: round(share[s] / len(groups), 1) for s in learn.SPLITS} == {
+        "train": 0.7,
+        "val": 0.1,
+        "test": 0.2,
+    }
+    u = {g: int(hashlib.sha1(g.encode()).hexdigest(), 16) / 16**40 for g in groups}
+    span = {s: [u[g] for g in groups if got[g] == s] for s in learn.SPLITS}
+    assert max(span["test"]) < 0.2 <= min(span["val"]) <= max(span["val"]) < 0.3
+    assert min(span["train"]) >= 0.3
 
 
-def test_presets_take_json_or_string_overrides_of_their_keys():
+def test_songs_differing_only_in_meta_are_split_once(exp, caplog):
+    exp.select()
+    rows = sorted(exp.songs(), key=learn.shared.name)
+    first, dup = (learn.shared.name(r) for r in rows[1:3])
+    text = exp.path("lifted", first).read_text()
+    exp.path("lifted", dup).write_text(text.replace("author:A", "author:B"))
+    caplog.set_level("INFO")
+    exp.split()
+    assert first in exp.docs() and dup not in exp.docs() and len(exp.docs()) == 10
+    assert "1 duplicates" in caplog.text
+
+
+def test_the_corpus_lifts_each_song_of_the_selection(exp, monkeypatch):
+    calls = []
+    monkeypatch.setattr(learn.corpus, "main", calls.append)
+    exp.forms()
+    assert calls[0][calls[0].index("--subtune") + 1] == "all"
+    exp.cfg |= {"subtunes": False, "min_seconds": 10}
+    exp.forms()
+    assert calls[1][calls[1].index("--subtune") :][:4] == ["--subtune", "0", "--min-seconds", "10"]
+    rows = [{"path": "a/t.sid", "songs": 3, "lengths": "20 5 30"}, {"path": "b.sid", "songs": 2}]
+    with (exp.out / "tunes.csv").open("w", newline="") as fh:
+        writer = csv.DictWriter(fh, ["path", "songs", "lengths"])
+        writer.writeheader()
+        writer.writerows(rows)
+    assert [learn.shared.name(r) for r in exp.songs()] == ["t", "b"]
+    exp.cfg["subtunes"] = True
+    assert [learn.shared.name(r) for r in exp.songs()] == ["t", "t-s2", "b", "b-s1"]
+
     cfg = learn.config("full", ["steps=7", 'forms=["all"]', "player=GoatTracker"])
     assert cfg["steps"] == 7 and cfg["forms"] == ["all"] and cfg["player"] == "GoatTracker"
     assert learn.PRESETS["full"]["steps"] != 7
@@ -127,6 +166,17 @@ def _constrained_samples_are_grammar_prefixes(exp):
             assert all(s["prefix"] == 1.0 for s in constrained), (r, kind)
             if r.tok == "bpe":
                 assert all(0 <= s["prefix"] <= 1 for s in rec[kind])
+
+
+def _verified_bits_are_the_verified_test_documents(exp, rows):
+    test = exp.docs("test")
+    ok = [d for d in test if exp.meta(d)["verified"]]
+    for r in rows:
+        run = learn.Run(r["form"], r["tokenizer"], "" if r["model"] == "scratch" else r["model"])
+        per_doc = json.loads((exp.rundir(run) / "eval.json").read_text())["per_doc"]
+        assert r["verified_docs"] == len(ok) < len(test)
+        want = sum(per_doc[d] for d in ok) / sum(test[d]["ticks"] for d in ok)
+        assert r["bits_per_tick_verified"] == pytest.approx(want)
 
 
 def test_an_experiment_runs_end_to_end_and_resumes(exp, caplog):  # pylint: disable=R0914
@@ -159,6 +209,7 @@ def test_an_experiment_runs_end_to_end_and_resumes(exp, caplog):  # pylint: disa
     ft = exp.rundir(learn.Run(best["form"], "cl100k_base", exp.cfg["ft_model"]))
     assert (ft / "best.pt").exists() and not (ft / "last.pt").exists()
     assert len(list((ft / "samples").glob("*.yaml"))) == 4
+    _verified_bits_are_the_verified_test_documents(exp, rows)
     for r in rows:
         assert r["params"] > 0 and r["bits_per_tick"] > 0 and r["bits_per_token"] > 0
         assert 0 <= r["header_valid"] <= 1 and 0 <= r["continue_parses"] <= 1
