@@ -367,6 +367,7 @@ def test_launch_builds_then_runs_detached_on_the_gpus(tmp_path):
     assert run[:3] == ["docker", "run", "-d"] and "nvidia.com/gpu=all" in run
     assert f"{tmp_path}:{tmp_path}" in run and f"{tmp_path / 'h'}:{tmp_path / 'h'}" in run
     assert run[-1].startswith("python tools/learn.py run --preset full >> ")
+    assert f"UNITRACKER_COMMIT={learn.corpus.versions()['unitracker']}" in run
 
 
 def test_the_command_line_runs_and_reports_status(exp, monkeypatch, capsys):
