@@ -875,6 +875,7 @@ def launch(argv: list, out: Path, hvsc: Path | None, tunes: Path | None = None) 
     build = ["docker", "build", "-q", "-t", IMAGE, "-f", f"{root}/docker/learn/Dockerfile", root]
     env = ["HOME=/tmp", f"HF_HOME={root}/.cache/hf", "PYTHONPATH=src:tools", "PYTHONUNBUFFERED=1"]
     env += ["PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"]
+    env += [f"UNITRACKER_COMMIT={corpus.versions()['unitracker'] or ''}"]
     env += [f"{v}=2" for v in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS")]
     cmd = shlex.join(["python", "tools/learn.py", "run", *argv])
     run = ["docker", "run", "-d", "--name", name, "--device", "nvidia.com/gpu=all", "--ipc=host"]
