@@ -11,7 +11,6 @@ import functools
 import hashlib
 import json
 import logging
-import lzma
 import math
 import os
 import re
@@ -23,10 +22,10 @@ from collections import Counter, namedtuple
 from pathlib import Path
 
 import numpy as np
-from tqdm import tqdm
 
 import corpus
 import shared
+from lm import LN2, META, META_LINE, device, nll, progress
 from unitracker.optimiser import tokenizer as tk
 
 OUT = shared.ROOT / "out" / "learn"
@@ -35,11 +34,8 @@ SPLITS = ("train", "val", "test")
 EOS = 0
 Run = namedtuple("Run", "form tok base")
 Run.name = property(lambda r: ".".join([r.form, r.tok] + [r.base.split("/")[-1]] * bool(r.base)))
-LN2 = math.log(2)
 HEADER = "unitracker:2.3\n"
-SAMPLES = ("header", "continue")
-META = "meta:{title:-}"
-META_LINE = re.compile(r"(?m)^meta:\{.*\}$")
+SAMPLES = ("header", "continue", "header_constrained", "continue_constrained")
 OPEN = {"(": "call", "[": "list", "{": "record"}
 COMMON = {
     "player": "GoatTracker_V2|SidWizard|DefMon",
@@ -60,6 +56,7 @@ COMMON = {
     "doc_starts": 0.25,
     "meta": False,
     "probe_docs": 96,
+    "constrain": True,
 }
 PRESETS = {
     "smoke": COMMON
@@ -126,12 +123,6 @@ PRESETS = {
 log = logging.getLogger("learn")
 
 
-def progress(it, **kw):
-    """``tqdm``, a line a minute when its output is not a terminal (a log file)."""
-    tty = sys.stderr.isatty()
-    return tqdm(it, mininterval=0.1 if tty else 60, ascii=not tty, **kw)
-
-
 def composer(path: str) -> str:
     """A tune's split group: its HVSC musician directory, else the tune itself."""
     parts = Path(path).parts
@@ -181,38 +172,6 @@ def where(doc: str, pos: int) -> str:
         elif ch in ")]}" and stack:
             stack.pop()
     return stack[-1] if stack else "top"
-
-
-def device():
-    """``(device, autocast)``: the GPU with bf16 autocast when there is one, else the CPU."""
-    import torch  # pylint: disable=import-outside-toplevel,import-error
-
-    dev = "cuda" if torch.cuda.is_available() else "cpu"
-    return dev, torch.autocast(dev, torch.bfloat16, enabled=dev == "cuda")
-
-
-def nll(model, x, y, chunk: int = 1024):
-    """Each window's summed loss (nats) of its targets ``y`` (-100 ignored) under a causal LM,
-    its output head applied ``chunk`` positions at a time (recomputed in the backward pass), so
-    no window's logits over the vocabulary are held at once."""
-    # pylint: disable=import-outside-toplevel,import-error
-    import torch
-    from torch.nn.functional import cross_entropy
-    from torch.utils.checkpoint import checkpoint
-
-    hidden, head = model.get_decoder()(input_ids=x).last_hidden_state, model.get_output_embeddings()
-
-    def part(h, t):
-        logits = head(h).float()
-        flat = cross_entropy(logits.flatten(0, 1), t.flatten(), reduction="none")
-        return flat.view(t.shape).sum(1)
-
-    total = 0
-    for at in range(0, x.shape[1], chunk):
-        args = (hidden[:, at : at + chunk], y[:, at : at + chunk])
-        grad = torch.is_grad_enabled()
-        total = total + (checkpoint(part, *args, use_reentrant=False) if grad else part(*args))
-    return total
 
 
 class Experiment:  # pylint: disable=too-many-public-methods
@@ -345,7 +304,8 @@ class Experiment:  # pylint: disable=too-many-public-methods
         return self.out / "data" / tok
 
     def encode(self) -> None:  # pylint: disable=too-many-locals
-        """Per tokenizer, ``vocab.npy`` (its ids any document uses; model id i+1 is ``vocab[i]``,
+        """Per tokenizer, ``vocab.npy`` (its ids any document uses and every byte's, so that any
+        text can be spelled; model id i+1 is ``vocab[i]``,
         0 :data:`EOS`), and per form and split ``<form>.<split>.npy``, each document after an EOS
         with one at the end, indexed by ``<form>.<split>.json``."""
         docs = self.docs()
@@ -355,7 +315,8 @@ class Experiment:  # pylint: disable=too-many-public-methods
             for form in progress(self.cfg["forms"], desc=f"encode {tok}", unit="form"):
                 texts = [self.text(form, d) for d in names]
                 ids[form] = (enc.encode(texts), [len(t) for t in texts])
-            vocab = np.unique(np.concatenate([np.concatenate(v[0]) for v in ids.values()]))
+            used = [np.concatenate(v[0]) for v in ids.values()]
+            vocab = np.unique(np.concatenate(used + [enc.byte_ids()]))
             out = self.data(tok)
             out.mkdir(parents=True, exist_ok=True)
             np.save(out / "vocab.npy", vocab)
@@ -626,18 +587,31 @@ class Experiment:  # pylint: disable=too-many-public-methods
         (rd / "eval.json").write_text(json.dumps(rec, indent=1), encoding="utf-8")
         log.info("%s: %.4f bits/tick", rd.name, rec["bits_per_tick"])
 
-    def generate(self, run: Run, model, prompts: np.ndarray) -> np.ndarray:  # pylint: disable=R0914
+    def generate(self, run: Run, model, prompts: np.ndarray, stuck: set | None = None):
         """Each prompt (a row of model ids) continued by sampling up to ``sample_tokens`` or an
-        EOS (the rest EOS), half a context at a time after the last half a context."""
+        EOS (the rest EOS), half a context at a time after the last half a context; given
+        ``stuck``, each kept to the document grammar (:mod:`constrain`), the rows it left no
+        model id added to ``stuck``."""
+        # pylint: disable=too-many-locals
         import torch  # pylint: disable=import-outside-toplevel,import-error
 
         ctx, limit, eos = self.hp(run, "ctx"), self.cfg["sample_tokens"], self.eos(run)
         seq = torch.from_numpy(np.asarray(prompts, np.int64)).to(device()[0])
         n, p = seq.shape
         torch.manual_seed(self.cfg["seed"])
+        if stuck is not None:
+            import constrain  # pylint: disable=import-outside-toplevel
+
+            con, cols = self.constraint(run, model)
+            native = prompts[:, 1:] if cols is None else cols[prompts[:, 1:]]
+            matchers = [con.matcher(row) for row in native]
         while seq.shape[1] < p + limit and not bool((seq[:, p:] == eos).any(1).all()):
             tail = seq[:, -(ctx // 2) :]
             new = min(ctx - tail.shape[1], p + limit - seq.shape[1])
+            extra = {}
+            if stuck is not None:
+                masked = constrain.Masked(con, matchers, cols, eos, seq.shape[1] == p)
+                extra["logits_processor"] = [masked]
             out = model.generate(
                 tail,
                 attention_mask=torch.ones_like(tail),
@@ -646,11 +620,28 @@ class Experiment:  # pylint: disable=too-many-public-methods
                 top_k=0,
                 eos_token_id=eos,
                 pad_token_id=eos,
+                **extra,
             )[:, tail.shape[1] :]
+            if stuck is not None:
+                stuck |= masked.stuck
             ended = (seq[:, p:] == eos).any(1, keepdim=True)
             pad = torch.full((n, new - out.shape[1]), eos, dtype=torch.long, device=seq.device)
             seq = torch.cat([seq, torch.cat([out, pad], 1).masked_fill(ended, eos)], 1)
         return seq.cpu().numpy()
+
+    def constraint(self, run: Run, model) -> tuple:
+        """``(constraint, cols)``: the document grammar over the run's tokenizer (its EOS the
+        pretrained model's, else one past its vocabulary), and each model id's native id (None
+        where they are the same)."""
+        from constrain import Constraint  # pylint: disable=import-outside-toplevel
+
+        tok = str(self.out / "bpe") if run.tok == "bpe" else run.tok
+        if not run.base:
+            con = Constraint(tok)
+            vocab = np.load(self.data(run.tok) / "vocab.npy").astype(np.int64)
+            return con, np.append(con.eos, vocab)
+        n_vocab = model.get_output_embeddings().weight.shape[0]
+        return Constraint(tok, eos=self.eos(run), n_vocab=n_vocab), None
 
     def prompts(self, run: Run) -> dict:
         """``{kind: prompts}`` in the run's model's ids, each after an EOS: ``samples`` of the
@@ -666,8 +657,10 @@ class Experiment:  # pylint: disable=too-many-public-methods
 
     def sample(self, run: Run) -> None:  # pylint: disable=too-many-locals
         """``samples/<kind>-<i>.yaml``, the best model's continuations of :meth:`prompts`, and
-        ``sample.json``: per kind, the share that end, parse and play ``play_ticks`` ticks, and
-        ``valid``, the mean share of generated characters before the first parse error."""
+        ``sample.json``: per kind, the share that end, parse and play ``play_ticks`` ticks,
+        ``valid`` (the share of generated characters before the first parse error) and where
+        the grammar is over the tokenizer, ``prefix``: the share of generated tokens a document
+        could still be completed after, truncation no error."""
         rd = self.rundir(run)
         if (rd / "sample.json").exists():
             return
@@ -678,17 +671,28 @@ class Experiment:  # pylint: disable=too-many-public-methods
         def text(ids):
             return enc.decode(ids if run.base else vocab[np.asarray(ids) - 1])
 
-        for kind, prompts in self.prompts(run).items():
-            recs, p = [], prompts.shape[1]
-            for i, ids in enumerate(self.generate(run, model, prompts)):
+        kinds = [(k, v, False) for k, v in self.prompts(run).items()]
+        con, cols = (None, None)
+        if run.tok == "bpe" or tk.REFERENCES.get(run.tok):
+            con, cols = self.constraint(run, model)
+        if self.cfg["constrain"] and con is not None:
+            kinds += [(f"{k}_constrained", v, True) for k, v, _ in kinds]
+        native = (lambda x: x) if cols is None else (lambda x: cols[x])
+        for kind, prompts, constrained in kinds:
+            recs, p, stuck = [], prompts.shape[1], set() if constrained else None
+            for i, ids in enumerate(self.generate(run, model, prompts, stuck)):
                 gen = ids[p:]
-                ended = bool((gen == eos).any())
+                ended = bool((gen == eos).any()) and i not in (stuck or ())
                 gen = gen[: np.argmax(gen == eos)] if ended else gen
                 head, doc = text(ids[1:p]), text(np.concatenate([ids[1:p], gen]))
                 (rd / "samples" / f"{kind}-{i}.yaml").write_text(doc, encoding="utf-8")
                 rec = {"tokens": len(gen), "ended": ended} | self.check(doc, len(head))
+                rec |= {"stuck": True} if i in (stuck or ()) else {}
+                if con is not None:
+                    taken = con.matcher(native(ids[1:p])).valid(native(gen))
+                    rec["prefix"] = taken / len(gen) if len(gen) else 1.0
                 recs.append(rec)
-            keys = ("ended", "parses", "plays", "valid")
+            keys = ("ended", "parses", "plays", "valid") + ("prefix",) * (con is not None)
             out |= {f"{kind}_{k}": float(np.mean([r[k] for r in recs])) for k in keys}
             out[f"{kind}_where"] = dict(Counter(r["where"] for r in recs if "where" in r))
             out[kind] = recs
@@ -744,107 +748,10 @@ class Experiment:  # pylint: disable=too-many-public-methods
             self.sample(run)
 
     def probe(self) -> None:
-        """``baselines.json`` (:meth:`baselines`) and per run ``probe.json``
-        (:meth:`probe_run`)."""
-        if not (self.out / "baselines.json").exists():
-            rec = {form: self.baselines(form) for form in self.cfg["forms"]}
-            (self.out / "baselines.json").write_text(json.dumps(rec, indent=1), "utf-8")
-        for run in self.runs() + self.runs(scratch=False):
-            self.probe_run(run)
+        """The analyses of :mod:`probe`: ``baselines.json`` and per run ``probe.json``."""
+        import probe  # pylint: disable=import-outside-toplevel
 
-    def baselines(self, form: str) -> dict:
-        """The test split's bits per song tick under models that know no structure: per
-        tokenizer its training split's unigram frequencies, xz, and zstd with up to 8 MiB of the
-        training split (seeded order) as a raw content dictionary, within its level 19 window."""
-        import zstandard  # pylint: disable=import-outside-toplevel
-
-        test = list(self.docs("test"))
-        ticks = sum(v["ticks"] for v in self.docs("test").values())
-        texts = [self.text(form, d).encode() for d in test]
-        train = [self.text(form, d).encode() for d in self.docs("train")]
-        order = np.random.default_rng(self.cfg["seed"]).permutation(len(train))
-        raw = b"".join(train[i] for i in order)[: 8 << 20]
-        zdict = zstandard.ZstdCompressionDict(raw, dict_type=zstandard.DICT_TYPE_RAWCONTENT)
-        zc = zstandard.ZstdCompressor(level=19, dict_data=zdict)
-        out = {
-            "raw": 8 * sum(map(len, texts)) / ticks,
-            "xz": 8 * sum(len(lzma.compress(t, preset=9 | lzma.PRESET_EXTREME)) for t in texts),
-            "zstd_dict": 8 * sum(len(zc.compress(t)) for t in texts) / ticks,
-        }
-        out["xz"] /= ticks
-        for tok in self.cfg["tokenizers"]:
-            uni = self.unigram(tok, form)
-            data = np.load(self.data(tok) / f"{form}.test.npy", mmap_mode="r")
-            out[f"unigram_{tok}"] = float(uni[data[1:]].sum()) / ticks
-        log.info("%s baselines (bits/tick): %s", form, out)
-        return out
-
-    def unigram(self, tok: str, form: str) -> np.ndarray:
-        """Each model id's surprisal (bits) under the training split's token frequencies
-        (add-half smoothed)."""
-        data = np.load(self.data(tok) / f"{form}.train.npy", mmap_mode="r")
-        size = len(np.load(self.data(tok) / "vocab.npy")) + 1
-        count = np.bincount(data, minlength=size) + 0.5
-        return -np.log2(count / count.sum())
-
-    def probe_run(self, run: Run) -> None:  # pylint: disable=too-many-locals
-        """``probe.json``: the best model's bits per token by grammar category (beside the
-        unigram's) over the first context of ``probe_docs`` test documents, and over their
-        last quarter context, the bits per token with each length of history."""
-        import torch  # pylint: disable=import-outside-toplevel,import-error
-
-        rd = self.rundir(run)
-        if (rd / "probe.json").exists() or not (rd / "best.pt").exists():
-            return
-        model, ctx, (dev, amp) = self.trained(run), self.hp(run, "ctx"), device()
-        data = np.load(self.data(run.tok) / f"{run.form}.test.npy", mmap_mode="r")
-        index = json.loads((self.data(run.tok) / f"{run.form}.test.json").read_text("utf-8"))
-        index = index[:: max(1, len(index) // self.cfg["probe_docs"])]
-        uni, enc, lut = self.unigram(run.tok, run.form), self.encoder(run.tok), self.lut(run)
-        size = len(tk.CATEGORIES)
-        cats = {"tokens": np.zeros(size), "bits": np.zeros(size), "unigram": np.zeros(size)}
-        start = 3 * ctx // 4
-        hist = [h for h in (16, 64, 256, ctx // 2, start) if h <= start]
-        context = {h: [0.0, 0] for h in hist}
-
-        for d in progress(index, desc=f"probe {rd.name}", unit="doc"):
-            toks = np.asarray(data[d["start"] : d["start"] + d["tokens"] + 1], np.int64)
-            x = toks[:ctx]
-            x_t = torch.from_numpy(x if lut is None else lut[x]).to(dev)[None]
-            y_t = torch.nn.functional.pad(x_t[:, 1:], (0, 1), value=-100)
-            with torch.no_grad(), amp:
-                hidden = model.get_decoder()(input_ids=x_t).last_hidden_state
-                logits = model.get_output_embeddings()(hidden).float()[0, :-1]
-            per = torch.nn.functional.cross_entropy(logits, y_t[0, :-1], reduction="none")
-            per = per.cpu().numpy() / LN2
-            text = self.text(run.form, d["doc"])
-            starts, ends = enc.spans(text)
-            cat = tk.attribute(tk.categories(text), starts, ends)[: len(per)]
-            np.add.at(cats["tokens"], cat, 1)
-            np.add.at(cats["bits"], cat, per[: len(cat)])
-            np.add.at(cats["unigram"], cat, uni[x[1 : len(cat) + 1]])
-            if len(toks) < ctx:
-                continue
-            for h in hist:
-                w = toks[start - h : ctx]
-                y = np.full(len(w), -100, np.int64)
-                y[h - 1 : -1] = w[h:]
-                xw = w if lut is None else lut[w]
-                yw = y if lut is None else np.where(y < 0, y, lut[np.maximum(y, 0)])
-                xw, yw = torch.from_numpy(xw).to(dev)[None], torch.from_numpy(yw).to(dev)[None]
-                with torch.no_grad(), amp:
-                    context[h][0] += nll(model, xw, yw).item() / LN2
-                context[h][1] += ctx - start
-        rec = {
-            "categories": {
-                c: {k: float(v[i]) for k, v in cats.items()}
-                for i, c in enumerate(tk.CATEGORIES)
-                if cats["tokens"][i]
-            },
-            "context": {str(h): b / max(n, 1) for h, (b, n) in context.items()},
-        }
-        (rd / "probe.json").write_text(json.dumps(rec, indent=1), encoding="utf-8")
-        log.info("%s probe: %s", rd.name, rec["context"])
+        probe.analyse(self)
 
     def results(self) -> list:
         """Each run's row: its form, tokenizer, base model and its stages' records' scalars."""
@@ -873,13 +780,17 @@ class Experiment:  # pylint: disable=too-many-public-methods
             ("bits_per_tick", "bits/tick", "{:.4f}"),
             ("bits_per_tick_median", "median", "{:.4f}"),
             ("bits_per_char", "bits/char", "{:.4f}"),
-            ("header_valid", "header valid", "{:.0%}"),
+            ("header_prefix", "header prefix", "{:.0%}"),
             ("header_parses", "header parses", "{:.0%}"),
-            ("continue_valid", "continued valid", "{:.0%}"),
+            ("continue_prefix", "continued prefix", "{:.0%}"),
             ("continue_parses", "continued parses", "{:.0%}"),
             ("continue_plays", "continued plays", "{:.0%}"),
+            ("header_constrained_parses", "constrained header parses", "{:.0%}"),
+            ("header_constrained_plays", "constrained header plays", "{:.0%}"),
+            ("continue_constrained_parses", "constrained continued parses", "{:.0%}"),
+            ("continue_constrained_plays", "constrained continued plays", "{:.0%}"),
         ]
-        lines = ["| " + " | ".join(c[1] for c in cols) + " |", "|---|---|---|" + "---:|" * 11]
+        lines = ["| " + " | ".join(c[1] for c in cols) + " |", "|---|---|---|" + "---:|" * 15]
         for r in rows:
             lines.append("| " + " | ".join(f.format(r[k]) if k in r else "" for k, _, f in cols))
             lines[-1] += " |"
