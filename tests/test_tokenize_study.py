@@ -178,6 +178,7 @@ def test_the_forms_command_lifts_a_directory_and_tabulates(metal_warrior, tmp_pa
     assert [r["path"] for r in rows] == [str(tunes / metal_warrior.name), str(tunes / "x/junk.sid")]
     out = tmp_path / "out"
     argv = ["forms", str(tunes), "--out", str(out), "--jobs", "1", "--forms", "lifted"]
+    argv.append("--unchecked")
     assert corpus.main([*argv, "--limit", "500"]) == 0
     assert "lifted: 1/2 {'goattracker2': 1}" in capsys.readouterr().out
     table = {r["doc"].split("-", 1)[1]: r for r in csv.DictReader((out / "forms.csv").open())}
