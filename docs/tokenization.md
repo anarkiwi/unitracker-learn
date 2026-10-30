@@ -41,7 +41,6 @@ The 2040 `.sid` of `.tunecache`; 1064 are no direct lifter's format. Lifted subt
 | format | tunes | lifted | failures (the largest causes) |
 |---|---:|---:|---|
 | GoatTracker 2 | 699 | 666 | 13 wavetable command, 12 `SidParseError` (no song table, play call, 1.x player), 6 lift timeouts, 2 `PlayError` |
-| SID-Wizard | 182 | 109 | 8 multi-SID, 15 multispeed/play gate/initial filter build, 10 WF rows held with a pulse table, 7 instrument before any note, 5 FX, 28 others |
 | defMON | 57 | 51 | 3 not a recognised replay build, 3 others |
 | Music Assembler | 38 | 3 | 24 play routine not the player's entry, 8 note control, 3 others |
 

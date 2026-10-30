@@ -28,7 +28,7 @@ lossy mode's tolerances; their bits are of that tune.
 
 | stage | does | writes (under `out/learn/<preset>/`) |
 |---|---|---|
-| `tunes` | the HVSC tunes SIDId names GoatTracker 2, SID-Wizard or defMON (`pysidtracker.survey find`, once into `out/learn/tunes.csv`), all or a seeded sample | `tunes.csv` |
+| `tunes` | the HVSC tunes SIDId names GoatTracker 2 or defMON (`pysidtracker.survey find`, once into `out/learn/tunes.csv`), all or a seeded sample | `tunes.csv` |
 | `corpus` | each song's forms (`tools/corpus.py forms`): every subtune of a tune (`subtunes`; else its first) but those its HVSC song length puts under `min_seconds`, a subtune k past the first named `<tune>-s<k>`; cached per song in `out/learn/corpus/`, shared by the experiments. Each song's record holds its player, song length in ticks, whether its lifted document plays the native player's grid over that length (`verified`, `bad_cells`), and the unitracker commit and library versions that lifted it; a failed form's `.err` holds its exception's line, then its traceback | `../corpus/<form>/<tune>.yaml`, `../corpus/meta/<tune>.json` |
 | `split` | the songs every form has, those whose first form is the same but for its meta line kept once (the first by name), split by composer (the HVSC musician directory; a tune elsewhere is its own group): a composer's SHA-1 as a fraction of 1 is test under 10%, validation under 15%, else train (a held split no composer falls in takes the training composer of least hash), so no composer's style crosses splits and adding composers moves none | `split.json` |
 | `tokenizers` | the document BPE (`unitracker.optimiser.tokenizer`) trained on the training split of every form | `bpe/` |
