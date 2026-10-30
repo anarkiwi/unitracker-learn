@@ -7,11 +7,11 @@ printer changes would save them (all adopted as format 2.2), and a BPE trained o
 
 | step | tool |
 |---|---|
-| corpus: each cached tune a direct lifter reads, subtune 0, in every optimiser form, cached under `out/tokenize/<form>/<tune>.yaml` (a failure in `<tune>.err`, a form's timeout from its start) with `meta/<tune>.json` (format, song length) and `forms.csv` | `python tools/corpus.py forms .tunecache --out out/tokenize [--forms ...] [--timeout S]` |
+| corpus: each cached tune a lifter reads, subtune 0, in every optimiser form, cached under `out/tokenize/<form>/<tune>.yaml` (a failure in `<tune>.err`, a form's timeout from its start) with `meta/<tune>.json` (format, song length) and `forms.csv` | `python tools/corpus.py forms .tunecache --out out/tokenize [--forms ...] [--timeout S]` |
 | study: tokens per form and tokenizer, per category, per transform; `study.md`, `study.json` | `python tools/tokens.py out/tokenize [--forms ...] [--encoders ...]` |
 | a document BPE: train on the training split, evaluate on the held-out split | `python -m unitracker.optimiser.tokenizer {train CORPUS --vocab N --out DIR, eval DIR CORPUS}` |
 
-- **Forms** (`corpus.forms()`): `lifted` (the direct lifter's document), `named`
+- **Forms** (`corpus.forms()`): `lifted` (the lifter's document), `named`
   (`optimise(text, ticks=3000)`), `single` and `all` (the named form's `--inline` modes), and
   where the optimiser has its lossy mode, `lossy` (`lossy=fit.TOLERANCES`) and `lossy-single`,
   `lossy-all`. A form is listed with its base form, so a new optimiser mode is a new entry.
@@ -36,7 +36,7 @@ printer changes would save them (all adopted as format 2.2), and a BPE trained o
 
 ## Corpus
 
-The 2040 `.sid` of `.tunecache`; 1064 are no direct lifter's format. Lifted subtune 0:
+The 2040 `.sid` of `.tunecache`; 1064 are no lifter's format. Lifted subtune 0:
 
 | format | tunes | lifted | failures (the largest causes) |
 |---|---:|---:|---|
@@ -150,7 +150,7 @@ format whose separators are single spaces before words (`command-space`) or vani
 
 Format 2.2 is every recommended change, `indent-1` included; the transforms it implements are
 gone from `tools/tokens.py`. Measured with `tools/tokens.py` on a sample: 320 `.sid` drawn from
-`.tunecache` (seed 22), the 109 a direct lifter reads, in the `lifted`, `named` and `all` forms,
+`.tunecache` (seed 22), the 109 a lifter read, in the `lifted`, `named` and `all` forms,
 the 2.1 documents from the 2.1 tools and the 2.2 ones from the 2.2 tools (the same documents,
 their models printed in 2.2, take within 0.1% of the same tokens). Saving of total tokens:
 

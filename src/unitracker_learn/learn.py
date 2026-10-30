@@ -38,7 +38,7 @@ HEADER = "unitracker:2.3\n"
 SAMPLES = ("header", "continue", "header_constrained", "continue_constrained")
 OPEN = {"(": "call", "[": "list", "{": "record"}
 COMMON = {
-    "player": "GoatTracker_V2|DefMon",
+    "player": "GoatTracker_V2",
     "held": [0.05, 0.1],
     "seed": 0,
     "jobs": max(1, len(os.sched_getaffinity(0)) - 2),
