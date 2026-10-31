@@ -1,5 +1,5 @@
 transformers>=5.20.2
 accelerate>=1.15.0
 zstandard>=0.25
-peft>=0.21
+peft>=0.21.2
 llguidance>=1.9.1
