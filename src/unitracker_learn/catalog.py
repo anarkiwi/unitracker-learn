@@ -6,8 +6,7 @@ import re
 from pathlib import Path
 
 from pygoattracker import decompile_sid
-from pysidtracker import find_format
-from pysidtracker.header import parse_sid_header
+from pysidtracker import find_format, parse_sid_header, resolve_tune
 from pysidtracker.errors import SidError
 
 
@@ -19,8 +18,6 @@ def tune(source, hvsc=None) -> Path:
         return path
     if hvsc is not None and (Path(hvsc) / source).is_file():
         return Path(hvsc) / source
-    from pysidtracker.testing import resolve_tune  # pylint: disable=import-outside-toplevel
-
     found = resolve_tune(str(source))
     if found is None:
         raise FileNotFoundError(f"{source}: no such tune")

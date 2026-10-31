@@ -2,7 +2,6 @@ ARG BASE=pytorch/pytorch:2.14.1-cuda13.2-cudnn9-runtime
 
 FROM ${BASE} AS ml
 ENV PIP_BREAK_SYSTEM_PACKAGES=1 PIP_NO_CACHE_DIR=1
-RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
 COPY docker/learn/requirements.txt /tmp/
 RUN python -c "import torch" 2>/dev/null \
     || pip install torch --index-url https://download.pytorch.org/whl/cpu

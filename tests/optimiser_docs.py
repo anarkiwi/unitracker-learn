@@ -7,7 +7,9 @@ MODS = "mod:\n note():F(N)\n vib(d):v + d*(phi % 4)\n wob(e):v + e*(phi % 4)\n"
 TOP = ("restart", "ins", "ctrl", "pw", "filter", "phrase")
 
 
-def doc(defs: str, play: str = "[p1]", head: str = "voices:1\n", mods: str = MODS) -> str:
+def doc(
+    defs: str, play: str = "[p1]", head: str = "voices:1\n", mods: str = MODS, version: str = "2.3"
+) -> str:
     """A one-row ending document of ``defs`` (sections at 6 spaces, records at 8) playing
     ``play``: each section top-level, after the templates, in the grammar's order."""
     sections, kind = {}, None
@@ -22,7 +24,7 @@ def doc(defs: str, play: str = "[p1]", head: str = "voices:1\n", mods: str = MOD
         for k in TOP
         if k in sections
     )
-    return f"{HEAD}{head}{mods}{top}song:\n - play:{play}\n - end\n"
+    return f"{HEAD.replace('2.3', version, 1)}{head}{mods}{top}song:\n - play:{play}\n - end\n"
 
 
 DEFAULTS = doc(
