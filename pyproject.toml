@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unitracker-learn"
+version = "0.1.0"
+description = "Learnability, tokenization and constrained decoding of unitracker documents"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+authors = [{ name = "Josh Bailey" }]
+classifiers = ["Operating System :: POSIX :: Linux", "Programming Language :: Python :: 3"]
+dependencies = [
+    "unitracker @ git+https://github.com/anarkiwi/unitracker@ebc6c61ae85918b454bf49cc922471d2f58f4608",
+    "numpy>=1.23",
+    "tqdm>=4.70.1",
+    "pysidtracker>=0.50.1",
+    "pygoattracker>=0.10.0",
+    "unitracker-grammar>=0.17.2",
+    "unitracker-player>=0.25.1",
+    "tiktoken>=0.14.0",
+    "tokenizers>=0.23.3",
+    "huggingface_hub>=2.2.0",
+    "torch>=2.14",
+    "transformers>=5.19",
+    "peft>=0.21",
+    "llguidance>=1.9.1",
+    "zstandard>=0.25",
+]
+
+[project.optional-dependencies]
+dev = ["black>=24", "pylint>=3", "pytest>=7", "pytest-xdist>=3", "pytest-cov>=4", "pytest-timeout>=2.2"]
+
+[project.scripts]
+unitracker-learn = "unitracker_learn.learn:main"
+unitracker-corpus = "unitracker_learn.corpus:main"
+unitracker-tokens = "unitracker_learn.tokens:main"
+unitracker-tokenizer = "unitracker_learn.tokenizer:main"
+unitracker-constrain = "unitracker_learn.constrain:main"
+
+[project.urls]
+Homepage = "https://github.com/anarkiwi/unitracker-learn"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["tests"]
+timeout = 1200
+addopts = ["-rx"]
+
+[tool.pylint.format]
+max-line-length = 100
+
+[tool.black]
+line-length = 100

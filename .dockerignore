@@ -1,0 +1,7 @@
+*
+!pyproject.toml
+!docker/learn/requirements.txt
+!README.md
+!LICENSE
+!src
+!tests
