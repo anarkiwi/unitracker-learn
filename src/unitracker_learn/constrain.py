@@ -26,7 +26,6 @@ _LARK = re.compile(
 _TAIL = re.compile(r"(?:\(\?[!=](?:[^()\\]|\\.|\((?:[^()\\]|\\.)*\))*\)|\\b)+$")
 _LOOK = re.compile(r"\(\?<?[!=]|\\[bB]")
 SAFE = {("NEG", "SIGNED")}
-_FN = re.compile(r'(?m)^([A-Z]\w*): "([a-z]\w*\()"$')
 
 
 def _close(pat: str, start: int) -> int:
@@ -119,29 +118,11 @@ def lark(text: str) -> str:
     return _LARK.sub(sub, text)
 
 
-def unshadow(text: str) -> str:
-    """llguidance grammar ``text`` with a template definition (``DEF_SIG``) named as a function
-    literal (``MIN: "min("``) read as that literal's lexeme, its parameters and ``)=``: the
-    greedy lexer would otherwise extend ``min(v`` as a definition and refuse ``min(v,1)``."""
-    fns = _FN.findall(text)
-    if not fns:
-        return text
-    heads = "|".join(re.escape(lit) for _, lit in fns)
-    text = re.sub(
-        r"(?m)^DEF_SIG: (.*)$", lambda m: f"DEF_SIG: ({m[1]}) & ~/(?:{heads})(?s:.*)/", text
-    )
-    text = re.sub(
-        r"(?m)^(?!_?[A-Z]).*$", lambda m: re.sub(r"\bDEF_SIG\b", "(DEF_SIG | _fn_sig)", m[0]), text
-    )
-    names = " | ".join(n for n, _ in fns)
-    return text + f'\n_fn_sig: ({names}) (PARAM ("," PARAM)*)? ")" "="\n'
-
-
 @functools.cache
 def grammar(forcing: bool = False) -> str:
     """The canonical document grammar compiled for llguidance: any tokenization of bytes the
     grammar forces allowed, or with ``forcing`` only their canonical one."""
-    text = unshadow(lark(GRAMMAR.read_text(encoding="utf-8")))
+    text = lark(GRAMMAR.read_text(encoding="utf-8"))
     if not forcing:
         text = '%llguidance {"no_forcing": true}\n' + text
     return llguidance.LLMatcher.grammar_from_lark(text)
@@ -393,7 +374,7 @@ def agreement(con: Constraint, texts: list, n: int, limit: int, wander: int) -> 
 def _terminals() -> tuple:
     """``(defs, expr)``: the llguidance grammar's terminal definitions, and per Lark terminal its
     expression there (its name, or its literal)."""
-    defs = "\n".join(re.findall(r"(?m)^_?[A-Z]\w*:.*$", unshadow(lark(GRAMMAR.read_text("utf-8")))))
+    defs = "\n".join(re.findall(r"(?m)^_?[A-Z]\w*:.*$", lark(GRAMMAR.read_text("utf-8"))))
     named = set(re.findall(r"(?m)^(\w+):", defs))
     return defs, {
         t.name: t.name if t.name in named else json.dumps(t.pattern.value)
