@@ -1,7 +1,7 @@
 """Grammar-constrained decoding of canonical documents: llguidance token masks over a tokenizer's
 native ids admitting the continuations the document grammar allows, EOS where it may end.
 
-``python tools/constrain.py check|sample|bench|hazards TOKENIZER [DOCS...] [--eos ID]`` (``-h``).
+``unitracker-constrain check|sample|bench|hazards TOKENIZER [DOCS...] [--eos ID]`` (``-h``).
 """
 
 import argparse
@@ -15,10 +15,11 @@ from pathlib import Path
 import llguidance
 import numpy as np
 
-import lm
 from tqdm import tqdm
 from unitracker_grammar.canonical import GRAMMAR, parse, parser
 from unitracker_grammar.document import read
+
+from unitracker_learn import lm
 
 _LARK = re.compile(
     r'"(?:[^"\\]|\\.)*"|//[^\n]*|/((?:[^/\\\n]|\\.)+)/|^(\w+)\.\d+:|\s*->\s*\w+$', re.M
@@ -130,10 +131,10 @@ def grammar(forcing: bool = False) -> str:
 
 def tokenizer(tok):
     """A ``tokenizers.Tokenizer``: ``tok`` itself, else the tokenizer.json path, its directory
-    or the reference name that :func:`unitracker.optimiser.tokenizer.encoder` resolves."""
+    or the reference name that :func:`unitracker_learn.tokenizer.encoder` resolves."""
     if hasattr(tok, "to_str"):
         return tok
-    from unitracker.optimiser import tokenizer as tk  # pylint: disable=import-outside-toplevel
+    from unitracker_learn import tokenizer as tk  # pylint: disable=import-outside-toplevel
 
     return tk.encoder(str(tok))._hf  # pylint: disable=protected-access
 

@@ -1,16 +1,16 @@
-"""tools/constrain.py: grammar masks over a document BPE's and Qwen2.5's ids take every valid
-document whole with its EOS, refuse broken syntax as the grammar's parser does, and sample
+"""unitracker_learn.constrain: grammar masks over a document BPE's and Qwen2.5's ids take every
+valid document whole with its EOS, refuse broken syntax as the grammar's parser does, and sample
 documents the parser takes."""
 
-import constrain
 import numpy as np
 import pytest
-import test_tools_learn
 from lark.exceptions import LarkError
 from unitracker_grammar.canonical import parser
 from unitracker_grammar.document import read
 
 import optimiser_docs as D
+import test_learn
+from unitracker_learn import constrain
 
 SECTIONS = (
     "unitracker:2.3\n"
@@ -81,7 +81,7 @@ INLINE = (
     " - end\n"
 )
 HANDWRITTEN = [v for v in vars(D).values() if isinstance(v, str) and "\nsong:\n" in v]
-LEARN = [test_tools_learn._doc(i) for i in range(3)]  # pylint: disable=protected-access
+LEARN = [test_learn._doc(i) for i in range(3)]  # pylint: disable=protected-access
 DOCS = HANDWRITTEN + LEARN + [SECTIONS, INLINE]
 # one edit of a document: (old, new) in D.DEFAULTS, whether the grammar's parser takes it or not
 EDITS = [
@@ -143,7 +143,7 @@ EDITS = [
 @pytest.fixture(name="bpe", scope="module")
 def _bpe(tmp_path_factory):
     """A document BPE trained on the documents, its EOS appended."""
-    from unitracker.optimiser import tokenizer as tk  # pylint: disable=import-outside-toplevel
+    from unitracker_learn import tokenizer as tk  # pylint: disable=import-outside-toplevel
 
     out = tmp_path_factory.mktemp("bpe")
     tk.train(DOCS, 400, out, progress=False, text=lambda d: d)

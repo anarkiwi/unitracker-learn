@@ -1,7 +1,7 @@
 """Token accounting of canonical documents (docs/tokenization.md): characters' grammar categories,
 tokens attributed by them, and a byte-level BPE trained on documents keeping lexemes whole.
 
-``python -m unitracker.optimiser.tokenizer train CORPUS... --vocab N --out DIR`` and
+``unitracker-tokenizer train CORPUS... --vocab N --out DIR`` and
 ``... eval DIR CORPUS...``.
 """
 
@@ -297,9 +297,7 @@ def table(results: dict) -> str:
 
 def main(argv=None) -> int:
     """Train or evaluate a document tokenizer."""
-    ap = argparse.ArgumentParser(
-        prog="python -m unitracker.optimiser.tokenizer", description=__doc__
-    )
+    ap = argparse.ArgumentParser(prog="unitracker-tokenizer", description=__doc__)
     sub = ap.add_subparsers(dest="command", required=True)
     p = sub.add_parser("train", help="train a BPE on the corpus's training split")
     p.add_argument("corpus", type=Path, nargs="+")

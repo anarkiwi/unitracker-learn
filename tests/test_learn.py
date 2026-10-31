@@ -1,17 +1,17 @@
-"""tools/learn.py: the composer split, a tiny experiment end to end on synthetic documents on the
-CPU, its status, and the container's launch commands."""
+"""unitracker_learn.learn: the composer split, a tiny experiment end to end on synthetic documents
+on the CPU, its status, and the container's launch commands."""
 
 import csv
 import hashlib
 import json
 from collections import Counter
 
-import learn
 import numpy as np
 import pytest
 from unitracker_player.player import play
 
 import optimiser_docs as D
+from unitracker_learn import learn
 
 NOTES = ("C4", "D4", "E4", "G4", "A4", "C5")
 FORMS = ("lifted", "named")
@@ -73,7 +73,7 @@ def _experiment(tmp_path, base):
     cfg |= {"ft_ctx": 64, "ft_batch": 2, "ft_micro": 1, "prompt_tokens": 8, "doc_starts": 0.5}
     exp = learn.Experiment(cfg, tmp_path / "out" / "x", tunes=tmp_path / "list.csv")
     for i, row in enumerate(rows[:-1]):
-        doc = learn.shared.name(row)
+        doc = learn.catalog.name(row)
         for form in FORMS:
             exp.path(form, doc).parent.mkdir(parents=True, exist_ok=True)
             exp.path(form, doc).write_text(_doc(i + (form == "named")), encoding="utf-8")
@@ -81,7 +81,7 @@ def _experiment(tmp_path, base):
         (exp.corpus / "meta" / f"{doc}.json").write_text(
             json.dumps({"ticks": 100 + i, "verified": i % 3 > 0})
         )
-    exp.path("named", learn.shared.name(rows[0])).unlink()
+    exp.path("named", learn.catalog.name(rows[0])).unlink()
     (exp.out / "stages").mkdir(parents=True)
     (exp.out / "stages" / "corpus").write_text("0\n")
     return exp
@@ -113,8 +113,8 @@ def test_a_groups_split_is_its_hash_against_the_held_fractions_whatever_the_othe
 
 def test_songs_differing_only_in_meta_are_split_once(exp, caplog):
     exp.select()
-    rows = sorted(exp.songs(), key=learn.shared.name)
-    first, dup = (learn.shared.name(r) for r in rows[1:3])
+    rows = sorted(exp.songs(), key=learn.catalog.name)
+    first, dup = (learn.catalog.name(r) for r in rows[1:3])
     text = exp.path("lifted", first).read_text()
     exp.path("lifted", dup).write_text(text.replace("author:A", "author:B"))
     caplog.set_level("INFO")
@@ -136,9 +136,9 @@ def test_the_corpus_lifts_each_song_of_the_selection(exp, monkeypatch):
         writer = csv.DictWriter(fh, ["path", "songs", "lengths"])
         writer.writeheader()
         writer.writerows(rows)
-    assert [learn.shared.name(r) for r in exp.songs()] == ["t", "b"]
+    assert [learn.catalog.name(r) for r in exp.songs()] == ["t", "b"]
     exp.cfg["subtunes"] = True
-    assert [learn.shared.name(r) for r in exp.songs()] == ["t", "t-s2", "b", "b-s1"]
+    assert [learn.catalog.name(r) for r in exp.songs()] == ["t", "t-s2", "b", "b-s1"]
 
     cfg = learn.config("full", ["steps=7", 'forms=["all"]', "player=GoatTracker"])
     assert cfg["steps"] == 7 and cfg["forms"] == ["all"] and cfg["player"] == "GoatTracker"
@@ -315,7 +315,7 @@ def test_a_share_of_training_windows_start_at_documents(exp):
 
 def test_meta_is_kept_where_asked(exp):
     exp.cfg["meta"] = True
-    assert "author:A" in exp.text("lifted", learn.shared.name({"path": "t0", "md5": "0" * 32}))
+    assert "author:A" in exp.text("lifted", learn.catalog.name({"path": "t0", "md5": "0" * 32}))
 
 
 def test_an_error_is_located_in_its_innermost_open_construct():
@@ -365,8 +365,8 @@ def test_launch_builds_then_runs_detached_on_the_gpus(tmp_path):
     assert build[:2] == ["docker", "build"] and rm == ["docker", "rm", "-f", "unitracker-learn-x"]
     assert run[:3] == ["docker", "run", "-d"] and "nvidia.com/gpu=all" in run
     assert f"{tmp_path}:{tmp_path}" in run and f"{tmp_path / 'h'}:{tmp_path / 'h'}" in run
-    assert run[-1].startswith("python tools/learn.py run --preset full >> ")
-    assert f"UNITRACKER_COMMIT={learn.corpus.versions()['unitracker']}" in run
+    assert run[-1].startswith("python -m unitracker_learn.learn run --preset full >> ")
+    assert f"UNITRACKER_LEARN_COMMIT={learn.corpus.versions()['unitracker-learn']}" in run
 
 
 def test_the_command_line_runs_and_reports_status(exp, monkeypatch, capsys):
@@ -427,7 +427,7 @@ def test_a_lora_fine_tune_trains_and_keeps_only_its_adapters(exp):
 
 def test_a_row_the_grammar_leaves_no_model_id_is_ended_and_stuck():
     import torch  # pylint: disable=import-outside-toplevel
-    import constrain  # pylint: disable=import-outside-toplevel
+    from unitracker_learn import constrain  # pylint: disable=import-outside-toplevel
 
     class Grammar:  # pylint: disable=too-few-public-methods
         """Masks that leave the second row only a native id no model id maps to."""

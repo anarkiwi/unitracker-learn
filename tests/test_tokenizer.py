@@ -1,4 +1,4 @@
-"""unitracker.optimiser.tokenizer: grammar categories, token attribution, encoders, and a BPE
+"""unitracker_learn.tokenizer: grammar categories, token attribution, encoders, and a BPE
 trained, split and evaluated on small documents."""
 
 import re
@@ -9,7 +9,7 @@ from tokenizers import pre_tokenizers
 
 import optimiser_docs as D
 
-from unitracker.optimiser import tokenizer as tk
+from unitracker_learn import tokenizer as tk
 
 DOC = (
     "unitracker:2.3\n"

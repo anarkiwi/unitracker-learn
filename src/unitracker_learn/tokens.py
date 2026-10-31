@@ -1,4 +1,4 @@
-"""The tokenization study of the document forms ``tools/corpus.py forms`` writes: tokens per
+"""The tokenization study of the document forms ``unitracker-corpus`` writes: tokens per
 document, tick, event and character by form and encoder, each lexical category's tokens, and
 each printer transform's saving (docs/tokenization.md).
 """
@@ -15,10 +15,10 @@ import numpy as np
 from pysidtracker.jobs import imap
 from tqdm import tqdm
 
-import corpus as lift
-from unitracker.optimiser import tokenizer as tk
+from unitracker_learn import corpus as lift
+from unitracker_learn import tokenizer as tk
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 _LONG = re.compile(r"\d{3,}")
 _LONG_ARG = re.compile(r"(?<=[(,+-])\d{3,}")
 _KEY = re.compile(r"([\s-]*)([a-z_][a-z_.]*):$")

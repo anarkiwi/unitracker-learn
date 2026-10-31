@@ -2,7 +2,7 @@
 
 Per form and tokenizer, a decoder trained from scratch for the same steps on HVSC tunes' forms,
 scored in bits per song tick on held-out composers' tunes and sampled for playable documents.
-Usage: ``python tools/learn.py {run,status,launch} [--preset smoke|full] [--set KEY=VALUE]``.
+Usage: ``unitracker-learn {run,status,launch} [--preset smoke|full] [--set KEY=VALUE]``.
 """
 
 import argparse
@@ -23,12 +23,12 @@ from pathlib import Path
 
 import numpy as np
 
-import corpus
-import shared
-from lm import LN2, META, META_LINE, device, nll, progress
-from unitracker.optimiser import tokenizer as tk
+from unitracker_learn import catalog, corpus
+from unitracker_learn.lm import LN2, META, META_LINE, device, nll, progress
+from unitracker_learn import tokenizer as tk
 
-OUT = shared.ROOT / "out" / "learn"
+ROOT = Path(__file__).resolve().parents[2]
+OUT = Path("out") / "learn"
 IMAGE = "unitracker-learn"
 SPLITS = ("train", "val", "test")
 EOS = 0
@@ -233,7 +233,7 @@ class Experiment:  # pylint: disable=too-many-public-methods
             source.parent.mkdir(parents=True, exist_ok=True)
             cmd = [sys.executable, "-m", "pysidtracker.survey", "find", str(self.hvsc)]
             subprocess.run(cmd + ["--out", str(source), "--player", self.cfg["player"]], check=True)
-        rows = shared.rows([source], self.cfg["player"])
+        rows = catalog.rows([source], self.cfg["player"])
         if self.cfg["tunes"]:
             rng = np.random.default_rng(self.cfg["seed"])
             pick = rng.choice(len(rows), min(self.cfg["tunes"], len(rows)), replace=False)
@@ -250,13 +250,13 @@ class Experiment:  # pylint: disable=too-many-public-methods
         return "all" if self.cfg.get("subtunes") else 0, self.cfg.get("min_seconds", 0)
 
     def songs(self) -> list:
-        """``tunes.csv``'s songs (:func:`shared.songs` of :meth:`selection`)."""
-        return shared.songs(shared.rows([self.out / "tunes.csv"]), *self.selection())
+        """``tunes.csv``'s songs (:func:`catalog.songs` of :meth:`selection`)."""
+        return catalog.songs(catalog.rows([self.out / "tunes.csv"]), *self.selection())
 
     def forms(self) -> None:
         """Each song's forms, cached in the corpus the experiments share."""
         subtune, seconds = self.selection()
-        args = ["forms", str(self.out / "tunes.csv"), "--out", str(self.corpus)]
+        args = [str(self.out / "tunes.csv"), "--out", str(self.corpus)]
         args += ["--subtune", str(subtune), "--min-seconds", str(seconds)]
         args += ["--forms", *self.cfg["forms"], "--timeout", str(self.cfg["timeout"])]
         args += ["--jobs", str(self.cfg["jobs"])]
@@ -274,9 +274,9 @@ class Experiment:  # pylint: disable=too-many-public-methods
     def split(self) -> None:
         """``split.json``: each song every form has, its split (by composer) and song ticks, of
         songs whose first form is the same but for its meta line only the first by name."""
-        songs, out, found = sorted(self.songs(), key=shared.name), {}, 0
+        songs, out, found = sorted(self.songs(), key=catalog.name), {}, 0
         for row in songs:
-            doc = shared.name(row)
+            doc = catalog.name(row)
             ticks = self.meta(doc).get("ticks", 0)
             if not ticks or not all(self.path(f, doc).exists() for f in self.cfg["forms"]):
                 continue
@@ -616,7 +616,7 @@ class Experiment:  # pylint: disable=too-many-public-methods
         n, p = seq.shape
         torch.manual_seed(self.cfg["seed"])
         if stuck is not None:
-            import constrain  # pylint: disable=import-outside-toplevel
+            from unitracker_learn import constrain  # pylint: disable=import-outside-toplevel
 
             con, cols = self.constraint(run, model)
             native = prompts[:, 1:] if cols is None else cols[prompts[:, 1:]]
@@ -649,7 +649,7 @@ class Experiment:  # pylint: disable=too-many-public-methods
         """``(constraint, cols)``: the document grammar over the run's tokenizer (its EOS the
         pretrained model's, else one past its vocabulary), and each model id's native id (None
         where they are the same)."""
-        from constrain import Constraint  # pylint: disable=import-outside-toplevel
+        from unitracker_learn.constrain import Constraint  # pylint: disable=import-outside-toplevel
 
         tok = str(self.out / "bpe") if run.tok == "bpe" else run.tok
         if not run.base:
@@ -765,7 +765,7 @@ class Experiment:  # pylint: disable=too-many-public-methods
 
     def probe(self) -> None:
         """The analyses of :mod:`probe`: ``baselines.json`` and per run ``probe.json``."""
-        import probe  # pylint: disable=import-outside-toplevel
+        from unitracker_learn import probe  # pylint: disable=import-outside-toplevel
 
         probe.analyse(self)
 
@@ -853,7 +853,7 @@ def status(out: Path, tail: int = 5) -> str:
             f"  {name:10} " + (f"done {mark.read_text().strip()}s" if mark.exists() else "-")
         )
     if (out / "tunes.csv").exists():
-        names = [shared.name(r) for r in exp.songs()]
+        names = [catalog.name(r) for r in exp.songs()]
         for form in exp.cfg["forms"]:
             have = sum(exp.path(form, d).exists() for d in names)
             err = sum(exp.path(form, d).with_suffix(".err").exists() for d in names)
@@ -868,16 +868,27 @@ def status(out: Path, tail: int = 5) -> str:
 
 
 def launch(argv: list, out: Path, hvsc: Path | None, tunes: Path | None = None) -> list:
-    """The commands that build the image and run ``learn.py run argv`` detached in it on the
-    host's GPUs as this user, named for ``out``, appending to ``out/learn.log`` (``out``'s
-    parent, the corpus's, and the tune list's directory mounted)."""
-    root, name = str(shared.ROOT), f"{IMAGE}-{out.name}"
-    build = ["docker", "build", "-q", "-t", IMAGE, "-f", f"{root}/docker/learn/Dockerfile", root]
-    env = ["HOME=/tmp", f"HF_HOME={root}/.cache/hf", "PYTHONPATH=src:tools", "PYTHONUNBUFFERED=1"]
+    """The commands that build the image and run ``python -m unitracker_learn.learn run argv``
+    detached in it on the host's GPUs as this user, named for ``out``, appending to
+    ``out/learn.log`` (``out``'s parent, the corpus's, and the tune list's directory mounted)."""
+    root, name = str(ROOT), f"{IMAGE}-{out.name}"
+    build = [
+        "docker",
+        "build",
+        "-q",
+        "--target",
+        "deps",
+        "-t",
+        IMAGE,
+        "-f",
+        f"{root}/docker/learn/Dockerfile",
+        root,
+    ]
+    env = ["HOME=/tmp", f"HF_HOME={root}/.cache/hf", "PYTHONPATH=src", "PYTHONUNBUFFERED=1"]
     env += ["PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"]
-    env += [f"UNITRACKER_COMMIT={corpus.versions()['unitracker'] or ''}"]
+    env += [f"UNITRACKER_LEARN_COMMIT={corpus.versions()['unitracker-learn'] or ''}"]
     env += [f"{v}=2" for v in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS")]
-    cmd = shlex.join(["python", "tools/learn.py", "run", *argv])
+    cmd = shlex.join(["python", "-m", "unitracker_learn.learn", "run", *argv])
     run = ["docker", "run", "-d", "--name", name, "--device", "nvidia.com/gpu=all", "--ipc=host"]
     run += ["--user", f"{os.getuid()}:{os.getgid()}", "-w", root]
     run += [x for e in env for x in ("-e", e)]
@@ -922,7 +933,7 @@ def main(argv=None) -> int:
         inner = [a for a in argv if a != "launch"] + ["--out", str(out)]
         for cmd in launch(inner, out, args.hvsc, args.tunes and args.tunes.resolve()):
             subprocess.run(cmd, check=cmd[1] != "rm", capture_output=cmd[1] == "rm")
-        print(f"python tools/learn.py status --out {out}")
+        print(f"python -m unitracker_learn.learn status --out {out}")
         return 0
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     Experiment(config(args.preset, args.set), out, args.hvsc, args.tunes).run(args.redo)

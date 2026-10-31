@@ -8,8 +8,8 @@ import lzma
 
 import numpy as np
 
-from lm import LN2, device, nll, progress
-from unitracker.optimiser import tokenizer as tk
+from unitracker_learn import tokenizer as tk
+from unitracker_learn.lm import LN2, device, nll, progress
 
 log = logging.getLogger("learn")
 
@@ -26,8 +26,8 @@ def analyse(exp) -> None:
 
 def baselines(exp, form: str) -> dict:
     """The test split's bits per song tick under models that know no structure: per
-    tokenizer its training split's unigram frequencies, xz, and zstd with up to 8 MiB of the
-    training split (seeded order) as a raw content dictionary, within its level 19 window."""
+    tokenizer its training split's unigram frequencies, xz, and zstd with a size-capped part of the
+    training split (seeded order) as a raw content dictionary, within its window."""
     import zstandard  # pylint: disable=import-outside-toplevel
 
     test = list(exp.docs("test"))

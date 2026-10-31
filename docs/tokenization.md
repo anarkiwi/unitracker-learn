@@ -7,9 +7,9 @@ printer changes would save them (all adopted as format 2.2), and a BPE trained o
 
 | step | tool |
 |---|---|
-| corpus: each cached tune a lifter reads, subtune 0, in every optimiser form, cached under `out/tokenize/<form>/<tune>.yaml` (a failure in `<tune>.err`, a form's timeout from its start) with `meta/<tune>.json` (format, song length) and `forms.csv` | `python tools/corpus.py forms .tunecache --out out/tokenize [--forms ...] [--timeout S]` |
-| study: tokens per form and tokenizer, per category, per transform; `study.md`, `study.json` | `python tools/tokens.py out/tokenize [--forms ...] [--encoders ...]` |
-| a document BPE: train on the training split, evaluate on the held-out split | `python -m unitracker.optimiser.tokenizer {train CORPUS --vocab N --out DIR, eval DIR CORPUS}` |
+| corpus: each cached tune a lifter reads, subtune 0, in every optimiser form, cached under `out/tokenize/<form>/<tune>.yaml` (a failure in `<tune>.err`, a form's timeout from its start) with `meta/<tune>.json` (format, song length) and `forms.csv` | `unitracker-corpus .tunecache --out out/tokenize [--forms ...] [--timeout S]` |
+| study: tokens per form and tokenizer, per category, per transform; `study.md`, `study.json` | `unitracker-tokens out/tokenize [--forms ...] [--encoders ...]` |
+| a document BPE: train on the training split, evaluate on the held-out split | `unitracker-tokenizer {train CORPUS --vocab N --out DIR, eval DIR CORPUS}` |
 
 - **Forms** (`corpus.forms()`): `lifted` (the lifter's document), `named`
   (`optimise(text, ticks=3000)`), `single` and `all` (the named form's `--inline` modes), and
@@ -29,7 +29,7 @@ printer changes would save them (all adopted as format 2.2), and a BPE trained o
   (meta values), `unicode` (any non-ASCII character), and otherwise by the character `punct`,
   `space`, or `indent` (a newline and the space or tab after it). A token takes
   the category most of its characters have (ties to the earlier category in that order).
-- **Transforms** (`tools/tokens.py`): each is a set of edits on the grammar's terminals (so
+- **Transforms** (`unitracker_learn.tokens`): each is a set of edits on the grammar's terminals (so
   reversible by a printer that knows it), applied to every document and re-tokenized; the saving
   is the corpus's total tokens before and after.
 - **Comparisons** are over the tunes every form has.
@@ -149,7 +149,7 @@ format whose separators are single spaces before words (`command-space`) or vani
 ## Format 2.2
 
 Format 2.2 is every recommended change, `indent-1` included; the transforms it implements are
-gone from `tools/tokens.py`. Measured with `tools/tokens.py` on a sample: 320 `.sid` drawn from
+gone from `unitracker_learn.tokens`. Measured with `unitracker_learn.tokens` on a sample: 320 `.sid` drawn from
 `.tunecache` (seed 22), the 109 a lifter read, in the `lifted`, `named` and `all` forms,
 the 2.1 documents from the 2.1 tools and the 2.2 ones from the 2.2 tools (the same documents,
 their models printed in 2.2, take within 0.1% of the same tokens). Saving of total tokens:
@@ -162,7 +162,7 @@ their models printed in 2.2, take within 0.1% of the same tokens). Saving of tot
 
 ## A document tokenizer
 
-`python -m unitracker.optimiser.tokenizer` trains a byte-level BPE (Hugging Face `tokenizers`)
+`unitracker-tokenizer` trains a byte-level BPE (Hugging Face `tokenizers`)
 whose pre-tokenizer (`tokenizer.LEXEME`) splits a document into lexemes: a newline with its
 indentation, a note, a key or name with the space before it and its `:`, a number, a
 punctuation run with its space, spaces. No token crosses a lexeme. The split is by the file
@@ -183,8 +183,8 @@ vocabulary saturates at 10811 tokens: every lexeme of the corpus is one token, s
 vocabulary needs a pre-tokenizer that lets tokens span lexemes (`, C4`, `{ctrl: `).
 
 ```sh
-python tools/corpus.py forms .tunecache --out out/tokenize --timeout 900
-python tools/tokens.py out/tokenize
-python -m unitracker.optimiser.tokenizer train out/tokenize/{lifted,named,single,all} --vocab 8192 --out out/bpe/8192
-python -m unitracker.optimiser.tokenizer eval out/bpe/8192 out/tokenize/{lifted,named,single,all}
+unitracker-corpus .tunecache --out out/tokenize --timeout 900
+unitracker-tokens out/tokenize
+unitracker-tokenizer train out/tokenize/{lifted,named,single,all} --vocab 8192 --out out/bpe/8192
+unitracker-tokenizer eval out/bpe/8192 out/tokenize/{lifted,named,single,all}
 ```
