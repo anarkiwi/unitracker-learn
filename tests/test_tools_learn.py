@@ -57,7 +57,7 @@ def _base(tmp_path_factory):
 def _experiment(tmp_path, base):
     """An experiment over 12 synthetic tunes by 6 composers, its corpus written."""
     rows = [
-        {"path": f"MUSICIANS/A/C{i % 6}/t{i}.sid", "md5": f"{i:032x}", "player": "DefMon"}
+        {"path": f"MUSICIANS/A/C{i % 6}/t{i}.sid", "md5": f"{i:032x}", "player": "GoatTracker_V2.x"}
         for i in range(12)
     ] + [{"path": "GAMES/G/g.sid", "md5": "f" * 32, "player": "Other"}]
     with (tmp_path / "list.csv").open("w", newline="") as fh:
@@ -351,12 +351,11 @@ def test_status_reports_stages_corpus_runs_and_the_log(exp):
 
 
 def test_the_tune_list_is_filtered_and_sampled(exp):
-    exp.cfg["player"] = "DefMon"
     exp.cfg["tunes"] = 5
     exp.select()
     with (exp.out / "tunes.csv").open() as fh:
         rows = list(csv.DictReader(fh))
-    assert len(rows) == 5 and {r["player"] for r in rows} == {"DefMon"}
+    assert len(rows) == 5 and {r["player"] for r in rows} == {"GoatTracker_V2.x"}
 
 
 def test_launch_builds_then_runs_detached_on_the_gpus(tmp_path):
@@ -372,6 +371,7 @@ def test_launch_builds_then_runs_detached_on_the_gpus(tmp_path):
 
 def test_the_command_line_runs_and_reports_status(exp, monkeypatch, capsys):
     calls = []
+    learn.corpus.versions()
     monkeypatch.setattr(learn.subprocess, "run", lambda cmd, **kw: calls.append(cmd))
     out = str(exp.out)
     assert learn.main(["launch", "--out", out, "--hvsc", out]) == 0
