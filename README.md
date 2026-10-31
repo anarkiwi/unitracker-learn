@@ -11,8 +11,6 @@ pip install torch --index-url https://download.pytorch.org/whl/cpu   # or the CU
 pip install -e ".[dev]"
 ```
 
-`unitracker` is pinned to a git ref in `pyproject.toml`.
-
 ## Commands
 
 | command | does |

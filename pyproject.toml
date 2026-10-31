@@ -12,13 +12,13 @@ license = { file = "LICENSE" }
 authors = [{ name = "Josh Bailey" }]
 classifiers = ["Operating System :: POSIX :: Linux", "Programming Language :: Python :: 3"]
 dependencies = [
-    "unitracker @ git+https://github.com/anarkiwi/unitracker@ebc6c61ae85918b454bf49cc922471d2f58f4608",
+    "unitracker>=0.2.0",
     "numpy>=1.23",
     "tqdm>=4.70.1",
     "pysidtracker>=0.50.1",
     "pygoattracker>=0.10.0",
-    "unitracker-grammar>=0.17.2",
-    "unitracker-player>=0.25.1",
+    "unitracker-grammar>=0.18.0",
+    "unitracker-player>=0.26.0",
     "tiktoken>=0.14.0",
     "tokenizers>=0.23.3",
     "huggingface_hub>=2.2.0",

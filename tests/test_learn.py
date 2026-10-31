@@ -27,8 +27,9 @@ def _doc(i: int) -> str:
         "        c1:[{wait:0,ctrl:65,note:+0},{hold:1,ctrl:64},end]\n"
         "      phrase:\n"
         f"        p1:[C4.i1,{notes}]\n",
-        head=f"voices:1\ntempo:{4 + i}\n",
+        head=f"voices:1\ntempo:{4 + i}\ncalls:{{frame:4}}\n",
         mods="",
+        version="2.5",
     )
 
 

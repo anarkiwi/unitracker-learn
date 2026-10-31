@@ -89,7 +89,7 @@ EDITS = [
     ("[C4.i1,", "[C4.i1}"),
     ("-*3]", "-*3]]"),
     ("ctrl:c1,", "ctrl:c1,,"),
-    ("unitracker:2.3", "unitracker:2.4"),
+    ("unitracker:2.3", "unitracker:2.6"),
     ("title:T", "titel:T"),
     ("D,-*3", "H,-*3"),
     ("D,-*3", "dd,-*3"),

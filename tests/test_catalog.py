@@ -76,10 +76,10 @@ def test_a_tune_is_found_under_hvsc_else_by_name(tmp_path, monkeypatch):
     (tmp_path / "M").mkdir()
     (tmp_path / "M" / "a.sid").write_bytes(b"a")
     assert catalog.tune("M/a.sid", tmp_path) == tmp_path / "M" / "a.sid"
-    monkeypatch.setattr("pysidtracker.testing.resolve_tune", lambda name: None)
+    monkeypatch.setattr("unitracker_learn.catalog.resolve_tune", lambda name: None)
     with pytest.raises(FileNotFoundError, match="no such tune"):
         catalog.tune("M/none.sid", tmp_path)
-    monkeypatch.setattr("pysidtracker.testing.resolve_tune", lambda name: str(tmp_path / name))
+    monkeypatch.setattr("unitracker_learn.catalog.resolve_tune", lambda name: str(tmp_path / name))
     assert catalog.tune("M/none.sid") == tmp_path / "M" / "none.sid"
 
 
